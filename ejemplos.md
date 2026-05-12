@@ -288,12 +288,31 @@ MCPs ya construidos en este servidor que pueden servir como referencia:
 
 | MCP | Puerto | Capacidad |
 |-----|--------|-----------|
-| `geocampo-mcp` | 8765 | Trae el informe agroclimático de la finca de cacao y lo clasifica con umbrales agronómicos |
+| `geocampo-mcp` | 8765 | Informe agroclimático de la finca de cacao, clasificado con umbrales agronómicos |
 | `mail-mcp` | 8766 | Send/receive correo + invitaciones de calendario (SMTP/IMAP/CalDAV) |
 | `calendar-mcp` | 8767 | Lectura y gestión de la agenda (CalDAV) |
+| `notion-mcp` | 8768 | Acceso a un workspace Notion vía integration interna |
+| `barchart-mcp` | 8769 | Cadena de opciones de futuros vía sesión Playwright autenticada |
+| `stonex-mcp` | 8770 | Cuenta de futuros StoneX (summary, positions, descarga + parseo de daily statements PDF) |
+| `inventory-mcp` | 8771 | Google Sheet de inventario (read/write) vía service account |
 
 Ver el `server.py` de cada uno para ver patrones más complejos (manejo de
 credenciales, parsing de respuestas, errores recuperables).
+
+### Patrones de autenticación observados
+
+Cada MCP de la tabla resuelve auth de manera distinta — útil como mapa
+mental cuando despliegues uno nuevo:
+
+- **API key estática** (geocampo, notion): variable de entorno en `docker-compose.yml` desde un `.env` con `chmod 600`. Simple, sin renovación.
+- **SMTP/IMAP/CalDAV con usuario+app-password** (mail, calendar): mismo patrón que API key, pero el secreto es un app-password del proveedor (Fastmail, Gmail, etc.).
+- **Sesión web persistida** (barchart): login Playwright al primer arranque, cookies+storage en un volumen montado; refresh transparente cuando la sesión expira.
+- **OAuth/OIDC con refresh token** (stonex): login Playwright bootstrap → guarda accessToken+refreshToken en disco → refresca con el endpoint OAuth del proveedor; fallback a Playwright si el refresh muere. Headers extra del proveedor (ej. `authentication-type: OKTA`) hay que descubrirlos interceptando requests reales de la SPA.
+- **Service account de Google** (inventory): JSON key descargada de GCP, montada read-only en `/data`, scope `spreadsheets`. La sheet se comparte con el email del SA como Editor. Sin expiración; rotar manualmente cada 6-12 meses.
+
+Para el último caso (service account), los pasos de provisión están fuera de
+este patrón porque dependen de la consola GCP del cliente. Conviene
+documentarlos en el `README.md` del MCP correspondiente, no acá.
 
 ---
 
