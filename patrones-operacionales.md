@@ -7,6 +7,7 @@ Tres patrones probados en producción (mayo 2026) que extienden lo cubierto en
 1. [Múltiples Hermes en el mismo servidor](#1-múltiples-hermes-en-el-mismo-servidor) — aislamiento vía `HERMES_HOME`.
 2. [Loop de trading autónomo](#2-loop-de-trading-autónomo) — cron + skill + helper script.
 3. [Migración Binance Algo Order (-4120)](#3-migración-binance-algo-order--4120) — workaround para `STOP_MARKET` / `TAKE_PROFIT_MARKET` desde 2025-12-09.
+4. [Anti-alucinación en tareas de consolidación temporal](#4-anti-alucinación-en-tareas-de-consolidación-temporal) — skill disciplinado con fuente única, no conversación libre.
 
 Todos se basan en una sola instancia de Hermes corriendo nativa (no Docker —
 esa es la forma upstream del agente; los MCPs sí van en contenedores).
@@ -511,3 +512,176 @@ for a in signed_request("GET", "/fapi/v1/openAlgoOrders",
 - [Binance docs — New Algo Order](https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/New-Algo-Order)
 - [freqtrade #12610 — discusión de la migración y workarounds](https://github.com/freqtrade/freqtrade/issues/12610)
 - [Binance Futures error codes](https://developers.binance.com/docs/derivatives/usds-margined-futures/error-code)
+
+---
+
+## 4. Anti-alucinación en tareas de consolidación temporal
+
+### Por qué
+
+Hermes tiene salvaguardas fuertes en los skills individuales (`cobertura-cacao`,
+`analisis-mercado-cacao`, `analisis-general` — todos con cláusulas
+`NUNCA inventar precios/noticias`) y en los prompts de cron (`Si alguna tool
+falla, di cuál y por qué — NO inventes datos`). Esas salvaguardas funcionan:
+los reportes daily emiten honestamente "balance intraday no disponible —
+get_account_summary falló con login failure" cuando no pueden leer la fuente.
+
+Sin embargo, cuando alguien pide en una **conversación interactiva libre**
+una tarea de consolidación temporal —tipo "dame un resumen de la semana
+pasada", "qué pasó este mes en AROCO"— el LLM no tiene un skill que regule
+la tarea. Construye narrativa cohesiva a partir de fragmentos parciales,
+rellena huecos con plausibilidades, y a veces invierte datos para que
+encajen en el arco que está armando.
+
+### Incidente que originó el patrón (2026-05-26)
+
+Un informe semanal "Resumen del mercado — semana del 18 al 22 de mayo"
+entregado al cliente contenía tres categorías de alucinación verificables
+contra los reportes daily reales:
+
+1. **Aritmética imposible.** "+13% hasta $4,709 USD/t partiendo de zona
+   $3,700–$3,800/t". De $3,800 a $4,709 son +23.9%, no +13%. Las tres
+   cifras (inicio, pico, %) eran mutuamente excluyentes.
+2. **Desplazamiento temporal.** El "spike del miércoles 20 de mayo" se
+   atribuía a un artículo del WSJ del **11 de mayo**. Un artículo del 11
+   no puede reportar un evento del 20. El evento real (si existió) ocurrió
+   antes de la ventana y fue reubicado dentro de ella para tener un evento
+   dramático que contar.
+3. **Inversión de un dato fundamental.** El daily real del 20-may reportó:
+   *"Stocks ICE-US 25/26 muy por encima del promedio de 5 años → menor
+   tensión en oferta física."* El informe semanal afirmó lo contrario:
+   *"~2.66M bags muy por debajo del promedio histórico de 4-5M → soporte
+   estructural alcista."* La inversión cambia la conclusión de neutro/bajista
+   a alcista.
+
+Adicionalmente: citaba como contemporáneos datos COT de 3 semanas antes
+de la ventana, citaba artículos del 24-26 de mayo dentro de un informe que
+cubre 18-22, y presentaba primas de opciones con rangos específicos
+después de admitir que la cadena de Barchart estuvo truncada toda la
+semana.
+
+### Diagnóstico
+
+No falló nada de la cadena MCP → skill → cron. Falló la **ausencia** de
+un skill que cubriera la tarea "consolidar la semana pasada". Esa tarea
+se ejecutó como conversación libre, sin las restricciones duras que sí
+tienen los skills disciplinados y los crons.
+
+### Patrón de solución
+
+Para cualquier tarea de **consolidación a través de una ventana temporal**
+(resumen semanal/mensual, retrospectiva de N días, "qué pasó", etc.),
+crear un skill dedicado con las siguientes propiedades:
+
+#### 4.1 Fuente única declarada
+
+El skill lee de **una sola fuente estructurada** (típicamente los markdown
+de `~/.hermes/cron/output/`, o un Sheet, o una tabla de BD). NO mezcla
+fuentes en vivo durante la consolidación.
+
+```markdown
+## Fuente única — reportes diarios cron
+
+Glob los archivos del filesystem en este árbol:
+- `~/.hermes/cron/output/*/YYYY-MM-DD_*.md`
+
+Identificar el tipo de reporte por su encabezado (no por path —
+el hash del subdirectorio cambia si el job se recrea).
+```
+
+#### 4.2 Restricción dura: no llamar MCPs en vivo
+
+```markdown
+1. NUNCA llamar MCPs en vivo. Este skill solo lee archivos del
+   filesystem. Si la lectura falla, abortar el brief y reportar
+   el error. No suplir con MCPs — derrota el propósito del skill.
+```
+
+La tentación de "completar con un check_session a barchart" es la puerta
+por la que entra la fabricación. Cerrarla explícitamente.
+
+#### 4.3 Formato fijo con secciones obligatorias
+
+El output tiene una estructura predefinida. Las secciones existen aunque
+estén vacías o marcadas `sin dato` / `no disponible esta ventana`. Esto
+elimina el incentivo a "rellenar para que la sección quede bonita".
+
+```markdown
+*🏦 CUENTA STONEX*
+- Balance EOD inicio: $X (lunes {dd})
+- Balance EOD cierre: $X (viernes {dd})
+- ...
+
+*⚠️ INCIDENCIAS OPERATIVAS*
+{Fallos reportados explícitamente por los daily}
+
+*📋 DATOS NO DISPONIBLES EN LA VENTANA*
+{Lista explícita de cosas que un resumen "completo" tendría pero
+esta semana no se pudo obtener}
+```
+
+La sección `DATOS NO DISPONIBLES` es la que más previene alucinación —
+declara explícitamente que el agente sabe que hay huecos y no los
+está rellenando.
+
+#### 4.4 Detección y declaración de contradicciones
+
+```markdown
+### Paso 4 — Detección de contradicciones
+
+Si dos reportes diarios de la ventana se contradicen:
+- Mismo Market Intel citado con datos distintos → contradicción.
+  Declararla explícitamente en el brief, NO resolverla eligiendo uno.
+- Balance EOD distinto sin movimiento explicado → declarar discrepancia.
+```
+
+Resolver contradicciones silenciosamente es el mecanismo por el cual el
+informe del incidente invirtió el dato de stocks. La regla es:
+**reportar la contradicción, no arbitrarla**.
+
+#### 4.5 Prohibición de narrativa cronológica libre
+
+```markdown
+3. NUNCA reorganizar la cronología. Si un evento aparece citado el
+   viernes pero la noticia es del lunes anterior a la ventana, NO
+   presentarlo como "evento del viernes". Marcar fecha del evento real.
+```
+
+El patrón "el miércoles pasó X" solo es lícito si el reporte del
+miércoles lo dice literalmente. Sin esa restricción, el LLM
+reordena eventos para construir un arco narrativo dramático.
+
+#### 4.6 Redirección a skills predictivos
+
+```markdown
+Si Pablo pide un análisis nuevo o predictivo ("qué creés que va a
+pasar", "view de mercado para la próxima semana"), redirigir a
+/analisis-general o /analisis-mercado-cacao. Este skill solo
+consolida lo ya reportado.
+```
+
+Separar "consolidar lo que fue" de "opinar sobre lo que será". Mezclar
+ambos en una sola tarea es lo que produjo el "view alcista moderado"
+inventado del informe original.
+
+### Skill de referencia
+
+La implementación concreta para AROCO está en
+`~/.hermes/skills/finance/resumen-semanal-aroco/SKILL.md`. Se invoca con
+`/resumen-semanal` y consolida la semana laboral anterior por defecto.
+Sirve como plantilla para crear consolidadores equivalentes
+(mensual, trimestral, retrospectiva por cliente, etc.).
+
+### Regla generalizable
+
+> Cuando se pida al LLM una tarea de **agregación temporal** sobre una
+> ventana definida, esa tarea necesita un skill dedicado con fuente
+> única, restricciones duras anti-fabricación y formato fijo con
+> sección explícita de "datos no disponibles". Una conversación libre
+> sin esas guardarraíles producirá narrativa cohesiva con datos
+> inventados — la cohesión narrativa es exactamente el incentivo
+> que el LLM optimiza cuando no hay restricción.
+
+Aplicar este patrón también a: retrospectivas mensuales, briefs de
+performance, reportes para clientes externos, cualquier consolidación
+que cruce más de 1 día de fuentes.
