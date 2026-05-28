@@ -774,12 +774,43 @@ Tras editar: rebuild del contenedor del MCP **y** restart de Hermes
 ### Regla generalizable
 
 > Si un tool de un MCP **escribe un archivo y devuelve su ruta** esperando
-> que el agente la lea, ese MCP **debe** registrar un `@mcp.resource` que
-> resuelva ese `file://...`. Tool que produce ruta + cero resources =
-> `Unknown resource` garantizado en cuanto algo intente leer el archivo.
-> Revisar este patrón en cualquier MCP con `download_*` / `export_*` /
-> `save_*` (candidatos en AROCO: stonex `download_daily_statement`,
-> `download_and_extract_daily`).
+> que el agente la lea **vía `read_resource`**, ese MCP **debe** registrar un
+> `@mcp.resource` que resuelva ese `file://...`. Tool que produce ruta + cero
+> resources + ningún tool de lectura = `Unknown resource` garantizado en
+> cuanto algo intente leer el archivo. Revisar este patrón en cualquier MCP
+> con `download_*` / `export_*` / `save_*`.
+
+La condición no es solo "devuelve una ruta" — son **dos** condiciones juntas:
+
+1. El archivo es **de texto** que el agente quiere leer como contenido, **y**
+2. **no existe ningún tool** que reciba la ruta y devuelva ese contenido.
+
+Si falta cualquiera de las dos, no hay bug: un PDF/binario no se lee útilmente
+como texto, y un tool de lectura por ruta (`parse_x(path)`) le da al agente un
+camino que funciona sin tocar `read_resource`.
+
+### Excepción verificada: stonex-mcp (revisado 2026-05-28)
+
+stonex **comparte la carencia estructural** (no registra ningún `@mcp.resource`,
+y `download_daily_statement` devuelve `{"path": ...}`) pero **NO tiene el bug**,
+porque falla ambas condiciones de arriba:
+
+- El extracto es un **PDF binario** — `read_resource` → `read_text()` sería
+  inútil aunque estuviera registrado.
+- Existe un **tool de lectura por ruta**: `extract_statement_data(pdf_path)`
+  parsea el PDF server-side y devuelve JSON estructurado. Y
+  `download_and_extract_daily` encadena descarga+extracción en una sola
+  llamada, así el agente ni maneja la ruta.
+
+Verificación empírica: **cero** `Unknown resource` de stonex en todo el
+histórico de `errors.log` (a diferencia de barchart). El único ruido de stonex
+en el log son warnings benignos de reintento de conexión en el arranque.
+
+**Conclusión: no tocar stonex** — el diseño "parsear server-side y devolver
+JSON" es el correcto para PDFs. El contraste con barchart es justo lo que
+define cuándo aplica el patrón: barchart devolvía un CSV (texto) y **no tenía
+tool de lectura** → el agente quedaba forzado a `read_resource` → callejón sin
+salida.
 
 ### Nota de operación
 
