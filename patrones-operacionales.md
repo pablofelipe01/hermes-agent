@@ -8,6 +8,7 @@ Tres patrones probados en producción (mayo 2026) que extienden lo cubierto en
 2. [Loop de trading autónomo](#2-loop-de-trading-autónomo) — cron + skill + helper script.
 3. [Migración Binance Algo Order (-4120)](#3-migración-binance-algo-order--4120) — workaround para `STOP_MARKET` / `TAKE_PROFIT_MARKET` desde 2025-12-09.
 4. [Anti-alucinación en tareas de consolidación temporal](#4-anti-alucinación-en-tareas-de-consolidación-temporal) — skill disciplinado con fuente única, no conversación libre.
+5. [MCPs que producen archivos: registrar un resource](#5-mcps-que-producen-archivos-registrar-un-resource) — fix del `Unknown resource` cuando un tool devuelve una ruta de archivo.
 
 Todos se basan en una sola instancia de Hermes corriendo nativa (no Docker —
 esa es la forma upstream del agente; los MCPs sí van en contenedores).
@@ -685,3 +686,109 @@ Sirve como plantilla para crear consolidadores equivalentes
 Aplicar este patrón también a: retrospectivas mensuales, briefs de
 performance, reportes para clientes externos, cualquier consolidación
 que cruce más de 1 día de fuentes.
+
+---
+
+## 5. MCPs que producen archivos: registrar un resource
+
+### Síntoma
+
+Un MCP tiene un tool que **descarga/genera un archivo** y devuelve su ruta
+(ej. `download_csv` → `{"path": "/data/csvs/CC_0__default__20260528_165000.csv"}`).
+El agente recibe la ruta, construye `file:///data/csvs/<archivo>.csv` y llama
+`read_resource` para leer el contenido — y obtiene:
+
+```
+Resource not found: Unknown resource: 'file:///data/csvs/<archivo>.csv'
+```
+
+El archivo **existe en disco con ese nombre exacto**. No es un problema de
+nombre ni de timestamp. Pega sobre todo en **crons** (descargan el CSV →
+intentan leerlo → fallan en silencio → la cadena se queda sin los datos
+que acababa de bajar).
+
+### Diagnóstico
+
+Es un desajuste de **forma de API MCP**, no de filesystem. FastMCP distingue
+dos cosas:
+
+- **tools** (`@mcp.tool`) — lo que el server expone para *hacer* cosas.
+- **resources** (`@mcp.resource`) — lo que el server expone para *leer*.
+
+`resources/read` (lo que hace `read_resource`) solo resuelve **resources
+registrados**. Si el server solo declara tools y ninguno matchea
+`file:///data/csvs/...`, responde `Unknown resource`. Devolver una ruta como
+string desde un tool **no** la registra como resource — el camino de lectura
+queda como un callejón sin salida.
+
+Confirmar con un grep:
+
+```bash
+grep -nE "@mcp\.resource" server.py    # si no hay nada → este es el bug
+```
+
+### Fix — registrar un resource template
+
+Registrar el patrón de URI que el agente ya intenta leer:
+
+```python
+import os
+from pathlib import Path
+
+CSV_DIR = Path(os.environ.get("BARCHART_DATA_DIR", "/data")) / "csvs"
+
+@mcp.resource("file:///data/csvs/{name}")
+def read_csv_resource(name: str) -> str:
+    # Guard contra path-traversal: el name resuelto debe quedar dentro de CSV_DIR.
+    target = (CSV_DIR / name).resolve()
+    if not str(target).startswith(str(CSV_DIR.resolve()) + os.sep):
+        raise ValueError(f"Ruta fuera de {CSV_DIR}: {name}")
+    if not target.is_file():
+        raise FileNotFoundError(f"No existe: {name}")
+    return target.read_text()
+```
+
+Resuelve exactamente la llamada que el agente ya hace, **sin tocar el skill
+ni el cron**. El `{name}` captura el filename completo (incl. `.csv`).
+
+Alternativa/refuerzo: añadir un tool `read_csv(filename)` que devuelva el
+contenido — más descubrible, pero obliga a cambiar quien hoy usa
+`read_resource`. El resource template es el fix mínimo y el patrón MCP correcto.
+
+### Verificación (handshake real, no solo el puerto)
+
+```bash
+# initialize → guardar Mcp-Session-Id → notifications/initialized → resources/read
+curl -s -X POST http://127.0.0.1:8769/mcp \
+  -H 'Accept: application/json, text/event-stream' \
+  -H "Mcp-Session-Id: $SID" \
+  -d '{"jsonrpc":"2.0","id":4,"method":"resources/read",
+       "params":{"uri":"file:///data/csvs/<archivo>.csv"}}'
+# OK = la respuesta trae "contents" con el texto del CSV
+```
+
+Tras editar: rebuild del contenedor del MCP **y** restart de Hermes
+(no re-descubre en caliente — ver gotcha en
+[§1](#1-múltiples-hermes-en-el-mismo-servidor) y abajo).
+
+### Regla generalizable
+
+> Si un tool de un MCP **escribe un archivo y devuelve su ruta** esperando
+> que el agente la lea, ese MCP **debe** registrar un `@mcp.resource` que
+> resuelva ese `file://...`. Tool que produce ruta + cero resources =
+> `Unknown resource` garantizado en cuanto algo intente leer el archivo.
+> Revisar este patrón en cualquier MCP con `download_*` / `export_*` /
+> `save_*` (candidatos en AROCO: stonex `download_daily_statement`,
+> `download_and_extract_daily`).
+
+### Nota de operación
+
+Hermes hace discovery de MCPs **solo al arrancar** — no recarga tools ni
+resources en caliente. Si reinicias o editas un MCP individual, hay que
+`sudo systemctl restart hermes-gateway` para que el gateway lo vuelva a
+descubrir. El log lo confirma en `~/.hermes/logs/agent.log`:
+`MCP server '<name>' (HTTP): registered N tool(s)`.
+
+Caso real (2026-05-28): barchart-mcp solo tenía tools; los crons de
+cobertura fallaban con `Unknown resource` al leer el CSV recién bajado.
+Fix aplicado = resource template de arriba.
