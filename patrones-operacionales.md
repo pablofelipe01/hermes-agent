@@ -9,6 +9,7 @@ Tres patrones probados en producción (mayo 2026) que extienden lo cubierto en
 3. [Migración Binance Algo Order (-4120)](#3-migración-binance-algo-order--4120) — workaround para `STOP_MARKET` / `TAKE_PROFIT_MARKET` desde 2025-12-09.
 4. [Anti-alucinación en tareas de consolidación temporal](#4-anti-alucinación-en-tareas-de-consolidación-temporal) — skill disciplinado con fuente única, no conversación libre.
 5. [MCPs que producen archivos: registrar un resource](#5-mcps-que-producen-archivos-registrar-un-resource) — fix del `Unknown resource` cuando un tool devuelve una ruta de archivo.
+6. [MCPs solapados: deshabilitar uno para evitar confusión del modelo](#6-mcps-solapados-deshabilitar-uno-para-evitar-confusión-del-modelo) — dos stacks que cubren la misma función (email/calendario Fastmail vs Google).
 
 Todos se basan en una sola instancia de Hermes corriendo nativa (no Docker —
 esa es la forma upstream del agente; los MCPs sí van en contenedores).
@@ -823,3 +824,75 @@ descubrir. El log lo confirma en `~/.hermes/logs/agent.log`:
 Caso real (2026-05-28): barchart-mcp solo tenía tools; los crons de
 cobertura fallaban con `Unknown resource` al leer el CSV recién bajado.
 Fix aplicado = resource template de arriba.
+
+---
+
+## 6. MCPs solapados: deshabilitar uno para evitar confusión del modelo
+
+### Por qué
+
+Cuando dos MCPs cubren la **misma función** (p. ej. dos backends de email o de
+calendario), el modelo ve toolsets redundantes y puede elegir el equivocado,
+mezclar resultados de ambos, o dudar en cada turno. No es un bug del runtime —
+es ambigüedad de herramientas. La solución más limpia mientras un stack no sea
+el canónico es **dejar uno solo conectado a Hermes**.
+
+### Caso real (2026-06-02)
+
+AROCO tenía dos stacks solapados:
+
+| Función     | Fastmail            | Google                    |
+|-------------|---------------------|---------------------------|
+| Email       | `mail` (8766)       | `gmail` (8778)            |
+| Calendario  | `calendar` (8767)   | `gcalendar` (8779)        |
+
+Google pasó a ser el stack principal (cuenta `alvaro.acosta@aroco.co`), así que
+se desconectaron los dos MCPs de Fastmail para que Hermes opere sin ambigüedad.
+
+### Cómo (reversible, sin borrar nada)
+
+1. Comentar el bloque del MCP en `~/.hermes/config.yaml` bajo `mcp_servers:`
+   (dejar nota de fecha/motivo y cómo revertir):
+
+   ```yaml
+   mcp_servers:
+     # Fastmail MCPs deshabilitados 2026-06-02 para evitar conflicto/confusión
+     # con stack Google (gmail/gcalendar). Procesos siguen en 8766/8767;
+     # solo se desconectaron de Hermes. Revertir = descomentar + restart.
+     # mail:
+     #   url: http://localhost:8766/mcp
+     # calendar:
+     #   url: http://localhost:8767/mcp
+     gmail:
+       url: http://localhost:8778/mcp
+     gcalendar:
+       url: http://localhost:8779/mcp
+   ```
+
+2. `sudo systemctl restart hermes-gateway` — Hermes solo descubre MCPs al
+   arrancar (ver Nota de operación del patrón #5).
+
+3. Verificar en `~/.hermes/logs/agent.log` que el conteo bajó y que los servers
+   deshabilitados ya no aparecen:
+   `MCP: registered N tool(s) from M server(s)`. En este caso pasó de
+   **128 tools / 12 servers** a **100 tools / 10 servers**.
+
+4. Smoke test funcional read-only con el stack que queda:
+
+   ```bash
+   hermes -t mcp-gmail,mcp-gcalendar -z "Ping gmail, lista calendarios Google y
+   eventos de hoy. No envíes ni modifiques nada."
+   ```
+
+### Notas
+
+- **Tools que se pierden y no tienen equivalente directo:** `mail` (Fastmail)
+  exponía `send_calendar_invite` y `cancel_meeting`, que `gcalendar` no replica
+  1:1 — el equivalente Google es crear el evento con invitados vía
+  `mcp_gcalendar_create_event`. Revisar siempre qué tools únicas vive solo en el
+  MCP que se apaga antes de desconectarlo.
+- Los **procesos del MCP apagado siguen corriendo** en su puerto (solo se
+  cortó el `url:` desde Hermes). Si se quiere liberar recursos, detener además
+  su servicio/contenedor — pero dejarlos vivos hace el revert instantáneo.
+- Regla generalizable: ante toolsets redundantes, **un solo stack canónico
+  conectado**; el resto comentado con fecha/motivo, no borrado.
