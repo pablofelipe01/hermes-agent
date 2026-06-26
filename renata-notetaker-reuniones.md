@@ -19,7 +19,7 @@ enviar.
 | Pieza | Qué hace | Puerto | Estado |
 |-------|----------|--------|--------|
 | `renata-gcalendar-mcp` | Calendario de Renata + extrae `meet_link` de cada evento | 8782 | ✅ Fase 1 |
-| `renata-meet-mcp` | Bot Playwright que entra al Meet y captura la transcripción | 8783 | 🚧 Fase 2 |
+| `renata-meet-mcp` | Bot Playwright que entra al Meet y captura la transcripción | 8783 | ✅ Fase 2 |
 | cron + skill `reunion-notetaker` | Auto-dispara el bot y, al terminar, resume + envía correo | — | ⏳ Fase 3 |
 | Drive/Notion, Whisper, solapadas | Persistencia y robustez extra | — | ⏳ Fase 4 (opcional) |
 
@@ -101,40 +101,79 @@ próximos 30 días, las 14 con `meet_link` correcto.
 
 ---
 
-## Fase 2 — `renata-meet-mcp` (puerto 8783) 🚧
+## Fase 2 — `renata-meet-mcp` (puerto 8783) ✅
 
-Bot que entra al Meet y captura la reunión. Self-hosted, Playwright + Chromium.
+Bot self-hosted (Playwright + Chromium) que entra al Meet y captura la reunión
+por subtítulos. Desplegado y probado end-to-end 2026-06-26.
+
+### Estructura
+
+```
+~/projects/agents/renata-meet-mcp/
+├── server.py       # FastMCP: ping, verify_session, attend_meeting, capture_debug, test_captions
+├── meet_bot.py     # lógica Playwright (join, captions, idioma, CaptionCollector)
+├── Dockerfile      # base mcr.microsoft.com/playwright/python:v1.48.0-jammy
+├── docker-compose.yml  # 127.0.0.1:8783:8783, shm_size 1gb, /data rw
+└── requirements.txt    # fastmcp + playwright==1.48.0 (¡versión exacta!)
+```
+
+> **Gotcha imagen base:** la imagen Playwright-python trae los navegadores en
+> `/ms-playwright` pero **NO** el paquete pip `playwright`. Hay que instalarlo en
+> requirements con la **misma versión** que la imagen (1.48.0), o no matchea el
+> navegador.
 
 ### Pre-requisito manual (clave): sesión web sembrada
 
-Google **bloquea logins headless "frescos"**. Hay que sembrar una vez un
-`storage_state` (cookies) iniciando sesión como `renata@aroco.co` en un navegador
-controlado, y mantener la sesión caliente. Mismo principio que el `storage_state`
-del intel-mcp de StoneX. (Re-verificación periódica de Google = mantenimiento
-ocasional.)
+Google **bloquea logins headless "frescos"**. Se siembra UNA vez un
+`storage_state` (cookies) logueándose como `renata@aroco.co`. Método usado:
+**sembrar en la Mac y subir** (Playwright headed en el Mac de Pablo →
+`storage_state_renata.json` → `scp` a `~/projects/data/renata-meet/`).
+Verificado: la sesión sembrada desde otra máquina **sobrevive headless en el
+server** (`verify_session` → `logged_in:true`). El bot re-guarda el
+`storage_state` tras cada sesión para alargar la cookie. Mantenimiento ocasional
+cuando Google la caduque.
 
-### Captura recomendada: subtítulos en vivo, no audio
+Script de seed (correr en el Mac, dentro de un venv con `pip install playwright`
+y `playwright install chromium`):
 
-Leer el DOM de los **captions** de Meet da el texto **con nombre de quien habla**
-(diarización gratis) y evita montar audio virtual (PulseAudio) + Whisper.
-Trade-off: los captions a veces pierden palabras y hay que fijar idioma. Whisper
-queda como fallback de mayor fidelidad para la Fase 4.
+```python
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    b = p.chromium.launch(headless=False); c = b.new_context(); pg = c.new_page()
+    pg.goto("https://accounts.google.com/")
+    input(">>> Inicia sesion como renata@aroco.co; cuando estes DENTRO pulsa Enter...")
+    c.storage_state(path="storage_state_renata.json"); b.close()
+```
 
-### Flujo del bot
+### Captura: subtítulos en vivo (no audio)
 
-1. Abre el `meet_link`, apaga cámara y micrófono.
-2. Entra ("Join now"; si no es host puede caer en sala de espera → alguien la admite).
-3. (Recomendado) avisa por el chat: "Soy Renata, tomo notas de la reunión" — consentimiento.
-4. Acumula los captions mientras dura la reunión.
-5. Sale cuando la reunión termina / se queda sola; guarda la transcripción como artefacto.
+Leer el DOM de los **captions** da el texto **con nombre de quien habla**
+(diarización gratis) y evita audio virtual + Whisper. Detalles que costaron
+afinar contra una reunión real (UI en español):
 
-Tool central prevista: `attend_meeting(url, max_minutes)` → transcripción.
+- **Entrar:** botón **"Unirme ahora"** (no "Unirte"). Sala de espera →
+  "Pedir unirte" (alguien admite). Sin permisos cám/mic en el contexto
+  (`permissions=[]`) → entra muteada sin togglear.
+- **Barra inferior se auto-oculta** (opacidad) → mover el mouse para revelarla +
+  click `force=True`.
+- **Subtítulos:** botón `aria-label="Activar subtítulos"`; texto en
+  `div[role="region"][aria-label="Subtítulos"]`, cada bloque `div.nMcdL`, nombre
+  en `span.NWpY1d`.
+- **Idioma:** por defecto reconocía español como inglés. Hay que abrir "Ajustes
+  de subtítulos" → combobox "Idioma de la reunión" → "Español (México)".
+- **Meet reescribe el enunciado en vivo** (corrige, cambia mayúsculas) → un
+  colector confirma cada enunciado cuando se estabiliza (comparación
+  case-insensitive). Resultado: `Hablante: texto`, una línea por frase.
+
+Tool central: `attend_meeting(url, max_minutes)` → transcripción + archivo en
+`/data/transcripts/`. Tools de tuning: `capture_debug`, `test_captions`.
 
 ### Riesgos a tener presentes
 
-- Re-autenticación periódica de Google (mantenimiento de la sesión).
+- Re-autenticación periódica de Google (mantenimiento de la sesión sembrada).
 - Sala de espera si Renata no es host/invitada explícita.
 - Concurrencia: reuniones solapadas = varios Chromium = más RAM/CPU.
+- Consentimiento: avisar que Renata toma notas (sobre todo con externos).
 - Automatizar Meet va técnicamente contra los ToS de Google (riesgo bajo, uso interno).
 
 ---
