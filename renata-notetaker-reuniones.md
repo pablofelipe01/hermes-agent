@@ -168,10 +168,35 @@ afinar contra una reunión real (UI en español):
 Tool central: `attend_meeting(url, max_minutes)` → transcripción + archivo en
 `/data/transcripts/`. Tools de tuning: `capture_debug`, `test_captions`.
 
-### Riesgos a tener presentes
+### Seguro "salir si está sola"
+
+`_attend_core` cuenta participantes por el atributo `data-participant-id` (set de
+ids únicos). Si queda ≤1 (solo Renata) durante 3 min seguidos, sale. Cubre salas
+vacías (el cron entra a cualquier evento del calendario, haya gente o no) y el
+cierre de la reunión. `ended_reason` queda en `meeting_ended` / `alone` /
+`max_minutes`.
+
+### Botones de entrar
+
+Según el momento, Meet muestra distintos botones: **"Unirme ahora"** (reunión en
+vivo), **"Pedir unirte"** (sala de espera → alguien admite) o **"Unirte
+igualmente"** (fuera de hora / antes que el anfitrión / sala vacía). El regex de
+entrar contempla los tres; entrar a una sala vacía es seguro porque el
+alone-safeguard la saca en 3 min.
+
+### ⚠️ Riesgo operacional #1: no reconstruir con asistencia activa
+
+La asistencia corre como **asyncio task dentro del proceso del contenedor**.
+`docker compose up --build` / restart de `renata-meet` **mata la sesión viva**
+(Chromium muere, la transcripción en memoria se pierde). Pasó en producción: un
+rebuild para añadir una feature sacó a Renata de un Comité real en curso y se
+perdió la transcripción. **Antes de reconstruir/reiniciar**, verificar que no haya
+jobs en `waiting/joining/in_call` (`list_jobs`) ni Chromium vivo
+(`docker exec renata-meet-mcp sh -c 'ps aux | grep -c [c]hrome'`).
+
+### Otros riesgos
 
 - Re-autenticación periódica de Google (mantenimiento de la sesión sembrada).
-- Sala de espera si Renata no es host/invitada explícita.
 - Concurrencia: reuniones solapadas = varios Chromium = más RAM/CPU.
 - Consentimiento: avisar que Renata toma notas (sobre todo con externos).
 - Automatizar Meet va técnicamente contra los ToS de Google (riesgo bajo, uso interno).
