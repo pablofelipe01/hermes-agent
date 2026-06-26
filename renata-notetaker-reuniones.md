@@ -21,7 +21,8 @@ enviar.
 | `renata-gcalendar-mcp` | Calendario de Renata + extrae `meet_link` de cada evento | 8782 | ✅ Fase 1 |
 | `renata-meet-mcp` | Bot Playwright que entra al Meet y captura la transcripción | 8783 | ✅ Fase 2 |
 | cron + skill `reunion-notetaker` | Auto-dispara el bot y, al terminar, resume + envía correo | — | ✅ Fase 3 |
-| Drive/Notion, Whisper, solapadas | Persistencia y robustez extra | — | ⏳ Fase 4 (opcional) |
+| `renata-drive-mcp` | Guarda un Google Doc por reunión en carpeta compartida | 8784 | ✅ Fase 4 |
+| Notion/CRM, Whisper, solapadas | Integraciones y robustez extra | — | ⏳ futuro |
 
 Decisiones tomadas con Pablo: **notetaker completo** (no solo presencia) y **bot
 de navegador propio** (self-hosted, sin servicio externo tipo Recall.ai).
@@ -247,7 +248,28 @@ hermes cron create "*/2 5-21 * * *" \
 - Horario 5–21h cada 2 min como compromiso costo/latencia (cada corrida vacía es
   un turno LLM pequeño; ajustar frecuencia/horas si el costo OpenRouter molesta).
 
-## Fase 4 (opcional) ⏳
+## Fase 4 — `renata-drive-mcp` (puerto 8784) ✅
 
-Guardar en Drive/Notion, transcripción de alta fidelidad con Whisper, y manejo de
-reuniones solapadas.
+Guarda un **Google Doc por reunión** en una carpeta compartida. Clon del
+`drive-mcp` de Álvaro (que es solo lectura) **+ tools de escritura**, con OAuth
+propio de Renata (`token_renata_drive.json`, scope `drive`).
+
+- `ensure_folder(name, share_with)` — busca-o-crea carpeta (idempotente, filtra
+  `'me' in owners`) y la comparte como editor. Carpeta del flujo: **"Notas de
+  Reuniones AROCO"**, compartida con `alvaro.acosta@aroco.co` + `pablofelipe@me.com`.
+- `create_doc(name, html, folder_id)` — crea un Doc nativo desde HTML
+  (`MediaInMemoryUpload` `text/html` → mimeType `application/vnd.google-apps.document`).
+
+**Gotcha compartir con externos:** compartir con cuentas NO-Google (p. ej.
+`@me.com`) **exige `sendNotificationEmail=True`** (con `False` falla en silencio).
+`ensure_folder` manda notificación solo si el email no es `@aroco.co`. Las cuentas
+externas además quedan como "sesión de invitado" que **re-verifica cada 7 días**.
+
+El skill `reunion-notetaker` (Fase B) llama `ensure_folder` + `create_doc` (resumen
+HTML + transcripción al final) tras enviar el correo. Toolset del cron:
+`mcp-renata-drive`.
+
+## Futuro ⏳
+
+Integrar con el CRM de AROCO y con los calendarios del equipo; transcripción de
+alta fidelidad con Whisper; manejo de reuniones solapadas.
