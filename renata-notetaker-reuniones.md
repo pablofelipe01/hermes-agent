@@ -226,7 +226,7 @@ dos fases:
 - **Fase B:** `renata-meet.list_jobs(only_unsent_done=true)` → por cada job,
   `get_transcript`, redactar resumen (resumen ejecutivo + decisiones + acciones),
   enviar con `renata-gmail.send_message(use_html=true)` a
-  `alvaro.acosta@aroco.co, pablofelipe@me.com`, y `mark_sent`.
+  `alvaro.acosta@aroco.co, <correo-personal-de-Pablo>`, y `mark_sent`.
 
 ### Crons — DOS, separados, con turnos cortos
 
@@ -264,7 +264,7 @@ propio de Renata (`token_renata_drive.json`, scope `drive`).
 
 - `ensure_folder(name, share_with)` — busca-o-crea carpeta (idempotente, filtra
   `'me' in owners`) y la comparte como editor. Carpeta del flujo: **"Notas de
-  Reuniones AROCO"**, compartida con `alvaro.acosta@aroco.co` + `pablofelipe@me.com`.
+  Reuniones AROCO"**, compartida con `alvaro.acosta@aroco.co` + el correo personal de Pablo.
 - `create_doc(name, html, folder_id)` — crea un Doc nativo desde HTML
   (`MediaInMemoryUpload` `text/html` → mimeType `application/vnd.google-apps.document`).
 
