@@ -228,25 +228,33 @@ dos fases:
   enviar con `renata-gmail.send_message(use_html=true)` a
   `alvaro.acosta@aroco.co, pablofelipe@me.com`, y `mark_sent`.
 
-### Cron
+### Crons — DOS, separados, con turnos cortos
 
-Creado con la CLI:
+Para que **ningún turno se cuelgue**, el flujo va en dos crons independientes (un
+turno largo que hace todo es frágil; además puede chocar con el límite/restart del
+gateway):
+
+| Cron | Skill | Schedule | Toolsets | Qué hace |
+|------|-------|----------|----------|----------|
+| Notetaker entrar | `reunion-join` | `55 6-18 * * *` | gcalendar, meet | Fase A: detecta y programa la entrada. Turno mínimo. |
+| Notetaker resumen | `reunion-resumen` | `*/15 6-19 * * *` | meet, gmail, drive | Fase B: resume+correo+Doc de **UNA** reunión por corrida. |
+
+Claves del diseño anti-cuelgue:
+- **Separados:** la detección nunca queda bloqueada detrás de un resumen.
+- **Una reunión por corrida** en la Fase B: aunque terminen varias a la vez, cada
+  turno hace solo una y la siguiente se atiende en la próxima corrida (cada 15 min).
+- **Horarios distintos** (`:55` vs `*/15`) → normalmente no corren a la vez.
 
 ```bash
-hermes cron create "*/2 5-21 * * *" \
-  "Ejecuta el flujo del skill reunion-notetaker: Fase A entra a las reuniones por
-   empezar, Fase B resume y envía por correo las ya transcritas." \
-  --name "Notetaker reuniones" --skill reunion-notetaker --deliver local
+hermes cron create "55 6-18 * * *"  "..." --name "Notetaker entrar"  --skill reunion-join    --deliver local
+hermes cron create "*/15 6-19 * * *" "..." --name "Notetaker resumen" --skill reunion-resumen --deliver local
 ```
 
-- `--deliver local` → no spamea Telegram cada 2 min (el entregable es el correo).
+- `--deliver local` → no spamea Telegram (el entregable es el correo + el Doc).
 - **Gotcha `enabled_toolsets`** (ver [cronjobs.md](./cronjobs.md)): la CLI no tiene
-  flag para esto, así que tras crear el job hay que **editar
-  `~/.hermes-renata/cron/jobs.json`** y añadir al job
-  `"enabled_toolsets": ["mcp-renata-gcalendar","mcp-renata-meet","mcp-renata-gmail"]`,
-  luego `systemctl reload hermes-renata-gateway`. Sin esto el cron alucina tools.
-- Horario 5–21h cada 2 min como compromiso costo/latencia (cada corrida vacía es
-  un turno LLM pequeño; ajustar frecuencia/horas si el costo OpenRouter molesta).
+  flag, así que tras crear cada job hay que **editar `~/.hermes-renata/cron/jobs.json`**
+  y añadirle su `enabled_toolsets` (los de la tabla), luego
+  `systemctl reload hermes-renata-gateway`. Sin esto el cron alucina tools.
 
 ## Fase 4 — `renata-drive-mcp` (puerto 8784) ✅
 
