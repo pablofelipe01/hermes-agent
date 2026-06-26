@@ -20,7 +20,7 @@ enviar.
 |-------|----------|--------|--------|
 | `renata-gcalendar-mcp` | Calendario de Renata + extrae `meet_link` de cada evento | 8782 | ✅ Fase 1 |
 | `renata-meet-mcp` | Bot Playwright que entra al Meet y captura la transcripción | 8783 | ✅ Fase 2 |
-| cron + skill `reunion-notetaker` | Auto-dispara el bot y, al terminar, resume + envía correo | — | ⏳ Fase 3 |
+| cron + skill `reunion-notetaker` | Auto-dispara el bot y, al terminar, resume + envía correo | — | ✅ Fase 3 |
 | Drive/Notion, Whisper, solapadas | Persistencia y robustez extra | — | ⏳ Fase 4 (opcional) |
 
 Decisiones tomadas con Pablo: **notetaker completo** (no solo presencia) y **bot
@@ -178,14 +178,49 @@ Tool central: `attend_meeting(url, max_minutes)` → transcripción + archivo en
 
 ---
 
-## Fase 3 — cron + skill `reunion-notetaker` ⏳
+## Fase 3 — cron + skill `reunion-notetaker` ✅
 
-- **Cron de Renata** (cada ~5 min): llama `renata-gcalendar.upcoming_meetings`;
-  si hay reunión con Meet por empezar, dispara `renata-meet.attend_meeting`.
-- **Skill `reunion-notetaker`**: al terminar, toma la transcripción, genera
-  **resumen + acciones** con el modelo de Renata y lo entrega vía
-  `renata-gmail.send_message(use_html=True)`.
-- Recordar el gotcha `enabled_toolsets` de los crons (ver [cronjobs.md](./cronjobs.md)).
+Desplegada 2026-06-26. Une las piezas para que sea automático.
+
+### Asistencia en background (clave)
+
+Una reunión dura ~1 h; un turno del cron no puede bloquearse esa hora. Por eso
+`renata-meet` expone **`start_attendance(url, title)`** que lanza la asistencia
+en **background** (asyncio task) y devuelve al instante. El job se persiste en
+`/data/jobs/<id>.json`; la transcripción en `/data/transcripts/`. Anti-duplicado
+por **código de reunión + fecha** (no entra dos veces a la misma el mismo día).
+Tools de cosecha: `list_jobs(only_unsent_done)`, `get_transcript`, `mark_sent`.
+
+### Skill
+
+`~/.hermes-renata/skills/note-taking/reunion-notetaker/SKILL.md` — orquestador de
+dos fases:
+- **Fase A:** `renata-gcalendar.upcoming_meetings(within_minutes=4)` → por cada
+  reunión con Meet, `renata-meet.start_attendance`.
+- **Fase B:** `renata-meet.list_jobs(only_unsent_done=true)` → por cada job,
+  `get_transcript`, redactar resumen (resumen ejecutivo + decisiones + acciones),
+  enviar con `renata-gmail.send_message(use_html=true)` a
+  `alvaro.acosta@aroco.co, pablofelipe@me.com`, y `mark_sent`.
+
+### Cron
+
+Creado con la CLI:
+
+```bash
+hermes cron create "*/2 5-21 * * *" \
+  "Ejecuta el flujo del skill reunion-notetaker: Fase A entra a las reuniones por
+   empezar, Fase B resume y envía por correo las ya transcritas." \
+  --name "Notetaker reuniones" --skill reunion-notetaker --deliver local
+```
+
+- `--deliver local` → no spamea Telegram cada 2 min (el entregable es el correo).
+- **Gotcha `enabled_toolsets`** (ver [cronjobs.md](./cronjobs.md)): la CLI no tiene
+  flag para esto, así que tras crear el job hay que **editar
+  `~/.hermes-renata/cron/jobs.json`** y añadir al job
+  `"enabled_toolsets": ["mcp-renata-gcalendar","mcp-renata-meet","mcp-renata-gmail"]`,
+  luego `systemctl reload hermes-renata-gateway`. Sin esto el cron alucina tools.
+- Horario 5–21h cada 2 min como compromiso costo/latencia (cada corrida vacía es
+  un turno LLM pequeño; ajustar frecuencia/horas si el costo OpenRouter molesta).
 
 ## Fase 4 (opcional) ⏳
 
