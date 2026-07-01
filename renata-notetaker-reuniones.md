@@ -263,6 +263,42 @@ hermes cron create "*/15 6-19 * * *" "..." --name "Notetaker resumen" --skill re
   y añadirle su `enabled_toolsets` (los de la tabla), luego
   `systemctl reload hermes-renata-gateway`. Sin esto el cron alucina tools.
 
+### Probar la Fase B sin una reunión en vivo (recipe)
+
+Para validar el tramo resumen→correo→Doc no hace falta una reunión real: se
+**siembra un job "terminado y sin enviar"** con una transcripción sintética y se
+fuerza el cron `reunion-resumen`. Así se probó la auto-copia el 2026-07-01
+(end-to-end OK). Pasos:
+
+1. **Antes de sembrar, confirmar que la cola está vacía** (`sent=true` en todos)
+   para no arrastrar una reunión real en la prueba:
+   ```bash
+   docker exec renata-meet-mcp sh -c 'for f in /data/jobs/*.json; do \
+     python3 -c "import json;d=json.load(open(\"$f\"));print(d[\"status\"],d[\"sent\"],d[\"job_id\"])"; done'
+   ```
+2. **Sembrar** transcripción (`>5` líneas útiles, formato `Hablante: texto`) en
+   `/data/transcripts/` y un job en `/data/jobs/<code>_<TS>.json` con
+   `status:"done"`, `sent:false`, `lines:>5`, `transcript_path` apuntando al archivo.
+   Usar un `code` obvio de prueba (p. ej. `test-prueba-flujo`).
+3. **Disparar el cron real** (corre con sus toolsets vía el scheduler del gateway):
+   ```bash
+   HERMES_HOME=/home/aroco/.hermes-renata \
+     .../venv/bin/python -m hermes_cli.main cron run 9938e112e700   # id de "Notetaker resumen"
+   ```
+   El scheduler lo toma en el siguiente tick (~1 min); el job pasa a `sent:true`.
+4. **Verificar** en la sesión de la corrida
+   (`~/.hermes-renata/sessions/session_cron_<id>_<TS>.json`): que
+   `send_message.to` incluye los tres correos y que `send_message`/`create_doc`
+   devolvieron `ok:true` (con message id / webViewLink).
+5. **Limpiar** el job y la transcripción sembrados
+   (`rm` dentro del contenedor). No se reprocesan una vez `sent:true`, pero mejor no
+   dejar basura.
+
+> Caveats: (a) el correo se **entrega de verdad** a Pablo y Álvaro — avisar que es
+> una prueba. (b) `cron run` deja esta prueba como "última corrida" del cron, sin
+> efecto en el ciclo normal `*/15`. (c) **No** reconstruir `renata-meet` si hay una
+> asistencia viva (ver Riesgo #1 de la Fase 2).
+
 ## Fase 4 — `renata-drive-mcp` (puerto 8784) ✅
 
 Guarda un **Google Doc por reunión** en una carpeta compartida. Clon del
