@@ -226,7 +226,14 @@ dos fases:
 - **Fase B:** `renata-meet.list_jobs(only_unsent_done=true)` → por cada job,
   `get_transcript`, redactar resumen (resumen ejecutivo + decisiones + acciones),
   enviar con `renata-gmail.send_message(use_html=true)` a
-  `alvaro.acosta@aroco.co, <correo-personal-de-Pablo>`, y `mark_sent`.
+  `renata@aroco.co, alvaro.acosta@aroco.co, <correo-personal-de-Pablo>`, y `mark_sent`.
+
+  > **Auto-copia (2026-07-01):** Renata se incluye a sí misma en el "Para"
+  > (`renata@aroco.co`) para que cada informe quede archivado en su propio inbox
+  > como registro. Va en el "Para" visible (no BCC) porque a Pablo/Álvaro no les
+  > molesta verla; funciona sin más porque el correo sale de la misma cuenta
+  > `renata-gmail` (Gmail entrega sin problema un mensaje auto-dirigido). El Doc de
+  > Drive no cambia: Renata ya tiene acceso por ser dueña de la carpeta.
 
 ### Crons — DOS, separados, con turnos cortos
 
