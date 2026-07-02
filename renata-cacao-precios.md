@@ -102,6 +102,37 @@ CACAO_SHARE_WITH:  "<email-pablo>,alvaro.acosta@aroco.co"
 
 Fechas en `YYYY-MM-DD`; `end_date` default = hoy.
 
+## Comando `/precios-cacao` (skill orquestador)
+
+Encima del MCP hay un skill que hace el comando usable en lenguaje natural, al
+estilo de los skills `finance` de AROCO (`/analisis-general`, `/cobertura`):
+
+```
+~/.hermes-renata/skills/finance/precios-cacao/SKILL.md
+```
+
+Qué hace el skill:
+
+- **Interpreta el rango** relativo a hoy: "últimos 3 años", "desde agosto de 2025
+  a hoy", "este mes", o fechas explícitas → calcula `start_date`/`end_date`.
+- **Regla dura de decisión:** si lo invocan con el comando y hay un rango →
+  **SIEMPRE `export_cocoa_prices_to_sheet`** y devuelve el link. El chat-only
+  (`get_cocoa_prices`) queda reservado para preguntas de un precio puntual
+  ("¿a cuánto cerró ayer?"). Esto evita que el agente muestre la tabla en el chat
+  en vez de exportar.
+- Devuelve un mensaje Telegram con resumen (min/max, primero/último, variación) +
+  link a la pestaña.
+
+Uso:
+
+- `/precios-cacao últimos 3 años` · `/precios-cacao desde agosto 2025 a hoy` → al sheet.
+- *"¿a cuánto cerró el cacao ayer?"* → responde el número en el chat.
+
+> **Gotcha de testing:** en `hermes chat -q` el skill **no** se auto-inyecta —
+> hay que precargarlo con `-s precios-cacao`. En la gateway (Telegram) se carga
+> solo por el slash. Tras agregar un skill nuevo, `sudo systemctl reload
+> hermes-renata-gateway` para que la gateway lo indexe.
+
 ## Deploy
 
 ```bash
@@ -129,6 +160,8 @@ Verificar: `HERMES_HOME=~/.hermes-renata … hermes mcp list` debe mostrar
   → **231 filas**; pestañas únicas por rango; compartir OK.
 - Turno real de Renata vía `hermes chat -t mcp-renata-cacao -q "…"`: llamó
   `mcp_renata_cacao_get_cocoa_prices` y devolvió el cierre del día correcto.
+- Skill `/precios-cacao` (con `-s precios-cacao`): `/precios-cacao últimos 6 meses`
+  → exportó 125 filas a una pestaña y devolvió link + resumen. ✅
 
 Este MCP sigue el patrón general de [ejemplos.md](./ejemplos.md) e
 [integracion-mcp-app.md](./integracion-mcp-app.md).
