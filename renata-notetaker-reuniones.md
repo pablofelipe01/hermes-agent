@@ -243,17 +243,26 @@ gateway):
 
 | Cron | Skill | Schedule | Toolsets | Qué hace |
 |------|-------|----------|----------|----------|
-| Notetaker entrar | `reunion-join` | `55 6-18 * * *` | gcalendar, meet | Fase A: detecta y programa la entrada. Turno mínimo. |
+| Notetaker entrar | `reunion-join` | `*/15 6-19 * * *` | gcalendar, meet | Fase A: detecta y programa la entrada. Turno mínimo. |
 | Notetaker resumen | `reunion-resumen` | `*/15 6-19 * * *` | meet, gmail, drive | Fase B: resume+correo+Doc de **UNA** reunión por corrida. |
 
 Claves del diseño anti-cuelgue:
 - **Separados:** la detección nunca queda bloqueada detrás de un resumen.
 - **Una reunión por corrida** en la Fase B: aunque terminen varias a la vez, cada
   turno hace solo una y la siguiente se atiende en la próxima corrida (cada 15 min).
-- **Horarios distintos** (`:55` vs `*/15`) → normalmente no corren a la vez.
+
+> **Corrección de cobertura (2026-07-14):** el "entrar" corría `55 6-18 * * *`
+> (**solo a los :55**, mirando 15 min adelante), así que una reunión que empezaba
+> lejos del tope de hora (p. ej. **12:45**) caía en un punto ciego y Renata no
+> entraba. Ahora corre **`*/15 6-19`** con `upcoming_meetings(within_minutes=20)`
+> → ticks cada 15 min con ventana de 20 = cobertura sin huecos a cualquier minuto.
+> El anti-duplicado (código+fecha) evita doble-entrada cuando dos ticks ven la
+> misma reunión; `start_at` mantiene el job esperando en background hasta la hora
+> exacta. **Síntoma que delató el bug:** la reunión no genera ni job (a diferencia
+> de la sesión caducada, que sí crea job pero en `error:"no se pudo entrar"`).
 
 ```bash
-hermes cron create "55 6-18 * * *"  "..." --name "Notetaker entrar"  --skill reunion-join    --deliver local
+hermes cron create "*/15 6-19 * * *" "..." --name "Notetaker entrar"  --skill reunion-join    --deliver local
 hermes cron create "*/15 6-19 * * *" "..." --name "Notetaker resumen" --skill reunion-resumen --deliver local
 ```
 
