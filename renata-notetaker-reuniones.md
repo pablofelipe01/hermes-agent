@@ -320,6 +320,115 @@ El skill `reunion-notetaker` (Fase B) llama `ensure_folder` + `create_doc` (resu
 HTML + transcripción al final) tras enviar el correo. Toolset del cron:
 `mcp-renata-drive`.
 
+## Mantenimiento — sesión de Google del bot Meet (caduca cada ciertas semanas)
+
+La sesión web sembrada (`storage_state.json`, ver Fase 2) **caduca sola**. El bot
+la re-guarda tras **cada asistencia exitosa**, así que mientras hay reuniones se
+renueva sola; pero si pasan varios días sin una asistencia OK (o Google invalida
+la cookie), la sesión muere y **no puede auto-renovarse headless** (Google bloquea
+el re-login sin interacción). Pasó en producción: caducó ~2026-07-09 y del 9 al 14
+de julio Renata falló **todas** las reuniones.
+
+### Síntoma
+
+Renata recibe las convocatorias e **intenta** entrar (se crean jobs en
+`/data/jobs/`), pero cada job queda en:
+
+```json
+{ "status": "error", "started_at": null, "error": "no se pudo entrar" }
+```
+
+`started_at: null` = ni siquiera llega a la sala. El resto (gateway, contenedores,
+crons) está sano — engaña, porque `cron list` muestra `ok` (el turno del agente
+corrió bien; lo que falla es la entrada al Meet).
+
+### Diagnóstico (1 comando)
+
+```bash
+# verify_session vía el MCP (handshake streamable-http)
+BASE=http://127.0.0.1:8783/mcp
+H=(-H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream')
+curl -s -D /tmp/h.txt "${H[@]}" -X POST $BASE -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"c","version":"1"}}}' >/dev/null
+SID=$(grep -i mcp-session-id /tmp/h.txt | awk '{print $2}' | tr -d '\r')
+curl -s "${H[@]}" -H "mcp-session-id: $SID" -X POST $BASE -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
+curl -s "${H[@]}" -H "mcp-session-id: $SID" -X POST $BASE -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"verify_session","arguments":{}}}' | grep -o '"structuredContent":{[^}]*}'
+```
+
+- Caducada → `"logged_in":false,"email":null,"final_url":"https://accounts.google.com/...signin..."`
+- Sana → `"logged_in":true,"email":"renata@aroco.co","final_url":"https://meet.google.com/landing"`
+
+### Remedio — re-sembrar (paso manual desde una Mac, ~5 min)
+
+Google bloquea el login headless, así que hay que loguearse **una vez de forma
+interactiva** en una Mac y subir el `storage_state`. Es el mismo método de la
+Fase 2 (sembrar en la Mac y subir), repetido.
+
+1. En la Mac, dentro de un venv:
+   ```bash
+   mkdir -p ~/Desktop/renata && cd ~/Desktop/renata
+   python3 -m venv venv && source venv/bin/activate
+   pip install playwright && python3 -m playwright install chromium
+   ```
+2. Guardar `reseed_renata.py` (headed; abre Google, esperas a estar DENTRO como
+   `renata@aroco.co`, pulsas Enter, comprueba Meet y guarda el archivo solo si NO
+   rebotó al login):
+   ```python
+   from playwright.sync_api import sync_playwright
+   OUT = "storage_state_renata.json"
+   with sync_playwright() as p:
+       b = p.chromium.launch(headless=False)
+       c = b.new_context(locale="es-ES", viewport={"width":1280,"height":800})
+       pg = c.new_page(); pg.goto("https://accounts.google.com/", wait_until="load")
+       input(">>> Inicia sesion como renata@aroco.co; cuando estes DENTRO pulsa Enter...")
+       pg.goto("https://meet.google.com/", wait_until="load"); pg.wait_for_timeout(3000)
+       if "accounts.google.com" in pg.url or "signin" in pg.url:
+           print("[X] Sigue en login, NO se guardo. Reintenta.")
+       else:
+           c.storage_state(path=OUT); print("[OK] Guardado:", OUT, "| Meet:", pg.url)
+       b.close()
+   ```
+   ```bash
+   python3 reseed_renata.py    # entra como renata@aroco.co (+ 2FA), Enter al estar dentro
+   ```
+3. Subir al server, reemplazando el archivo:
+   ```bash
+   scp storage_state_renata.json aroco@<server>:/home/aroco/projects/data/renata-meet/storage_state.json
+   ```
+4. Verificar con el comando de diagnóstico → `logged_in:true`. **No** hace falta
+   reiniciar el contenedor: el bot lee el archivo fresco en cada asistencia (el
+   volumen `/data` está montado rw). Y como cuando está caducada **no hay
+   asistencias vivas** (todas en error), tampoco aplica el Riesgo #1.
+5. (Opcional) Prueba real: crea un Meet, `start_attendance(url=...)`, y confirma
+   `status:"in_call"` con `list_jobs` — deberías ver a Renata entrar.
+
+> El `storage_state.json` lleva las cookies de sesión de Renata: **sensible**, no
+> commitear ni compartir.
+
+### Chequeo diario automático (cron `Notetaker chequeo sesion`) ✅
+
+Desplegado 2026-07-14 para no volver a enterarse por una reunión perdida. Corre
+`verify_session` cada mañana y **avisa por Telegram SOLO si la sesión caducó**;
+si está sana, calla.
+
+- Skill: `~/.hermes-renata/skills/note-taking/reunion-sesion-check/SKILL.md`
+  — llama `renata-meet.verify_session`; si `logged_in:false` manda `send_message`
+  a Pablo y Álvaro (targets `telegram:<chat_id>`) con el aviso + recordatorio del
+  re-sembrado; si `logged_in:true` responde `[SILENT]` (marcador que suprime la
+  entrega — solo queda en el log de auditoría).
+- Cron:
+  ```bash
+  hermes cron create "30 6 * * *" "Ejecuta el skill reunion-sesion-check..." \
+    --name "Notetaker chequeo sesion" --skill reunion-sesion-check --deliver local
+  ```
+  Toolsets (`enabled_toolsets`): **`mcp-renata-meet`, `messaging`** — el mismo
+  gotcha de siempre (la CLI no fija `enabled_toolsets`: editar `cron/jobs.json` +
+  `systemctl reload`, ver [cronjobs.md](./cronjobs.md)). Sin `messaging` el agente
+  no tendría `send_message` para avisar.
+- Por qué `--deliver local` y no `--deliver telegram`: se avisa **condicional**
+  (solo al fallar) desde el propio skill con `send_message` a destinatarios
+  explícitos; `deliver:telegram` postearía en cada corrida (y además
+  `TELEGRAM_HOME_CHANNEL` no está configurado en Renata).
+
 ## Futuro ⏳
 
 Integrar con el CRM de AROCO y con los calendarios del equipo; transcripción de
