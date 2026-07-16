@@ -10,6 +10,7 @@ Tres patrones probados en producción (mayo 2026) que extienden lo cubierto en
 4. [Anti-alucinación en tareas de consolidación temporal](#4-anti-alucinación-en-tareas-de-consolidación-temporal) — skill disciplinado con fuente única, no conversación libre.
 5. [MCPs que producen archivos: registrar un resource](#5-mcps-que-producen-archivos-registrar-un-resource) — fix del `Unknown resource` cuando un tool devuelve una ruta de archivo.
 6. [MCPs solapados: deshabilitar uno para evitar confusión del modelo](#6-mcps-solapados-deshabilitar-uno-para-evitar-confusión-del-modelo) — dos stacks que cubren la misma función (email/calendario Fastmail vs Google).
+7. [MCPs que scrapean con sesión: que lleguen datos no prueba que la sesión viva](#7-mcps-que-scrapean-con-sesión-que-lleguen-datos-no-prueba-que-la-sesión-viva) — el health check que miente durante meses.
 
 Todos se basan en una sola instancia de Hermes corriendo nativa (no Docker —
 esa es la forma upstream del agente; los MCPs sí van en contenedores).
@@ -896,3 +897,130 @@ se desconectaron los dos MCPs de Fastmail para que Hermes opere sin ambigüedad.
   su servicio/contenedor — pero dejarlos vivos hace el revert instantáneo.
 - Regla generalizable: ante toolsets redundantes, **un solo stack canónico
   conectado**; el resto comentado con fecha/motivo, no borrado.
+
+---
+
+## 7. MCPs que scrapean con sesión: que lleguen datos no prueba que la sesión viva
+
+### Por qué
+
+Un MCP que scrapea un sitio autenticado con Playwright (`storage_state.json` +
+Chromium headless) suele traer un `check_session()` para avisar cuándo hay que
+regenerar la sesión. Es la única defensa contra cookies vencidas, así que si
+ese check miente, miente en silencio y por meses.
+
+Caso real (`barchart-mcp`, julio 2026): `check_session` devolvía `ok: true` y
+`get_options_chain` devolvía datos correctos. Todo verde. La sesión llevaba
+semanas caída — el sitio **sirve los mismos datos a usuarios anónimos con una
+cuota diaria de vistas**, así que el MCP venía funcionando de prestado, sujeto
+a un límite que nadie estaba mirando y con fallos intermitentes inexplicables.
+
+La lección no es sobre Barchart: **en un sitio con tier gratuito anónimo, "la
+request devolvió datos" y "sigo logueado" son afirmaciones independientes.**
+Un health check que confunde las dos no vale nada.
+
+### Las tres trampas
+
+**1. Verificar la sesión por el string equivocado.**
+
+```python
+# MAL: frágil de dos formas distintas
+logged_in = "/login" not in url and "Sign In" not in html
+```
+
+Falla porque (a) el markup decía `LOGIN`, no `Sign In` — nunca matcheó; y (b)
+la página de perfil devuelve 200 con su shell completo a usuarios anónimos, así
+que ni la URL ni el status distinguen nada. Un `not in html` sobre la página
+entera es especialmente traicionero: cualquier cambio de copy lo rompe, y
+rompe hacia el lado optimista.
+
+```python
+# BIEN: mirar el bloque del header que muestra la cuenta, y solo ese
+block = page.locator(".bc-user-block").first.inner_text()
+# anónimo -> "LOGIN Try Barchart for Free"; logueado -> nombre/email
+anon = (not block) or re.search(r"\blogin\b|create account", block, re.I)
+```
+
+**2. No verificar el plan.** El login puede estar vivo pero la suscripción
+caída, y las tools degradan sin decirlo. Truco general: pedir una URL que solo
+existe para suscriptores y mirar **si redirige**. La página de venta es el
+delator.
+
+```python
+page.goto("https://www.barchart.com/my/barchart-plus")
+if "/get-barchart-premier" in page.url:  # rebotó al upsell
+    plan = "free"
+elif "/my/barchart-plus" in page.url:
+    plan = "plus"
+```
+
+**3. Asumir el formato de un valor en vez de leerlo.** El mismo MCP tenía
+`list_expirations()` devolviendo `0` en silencio: filtraba los `<option>` del
+dropdown con `^\d{2}-\d{2}-\d{4}$` esperando `MM-DD-YYYY`, pero los valores
+reales son **rutas de navegación**:
+
+```
+/futures/quotes/CCU26/options/sep-26
+```
+
+Y por lo mismo, pasar la expiración como query param (`?expiration=...`) no
+hacía nada: el sitio navega por ruta, así que el parámetro se ignoraba y la
+tool devolvía siempre el mes por defecto — silenciosamente, que es lo peor.
+La forma correcta es cargar la página, **leer el dropdown** y navegar al
+`value` que trae:
+
+```python
+opts = page.eval_on_selector_all(
+    "#bc-options-toolbar__dropdown-month option",
+    "els => els.map(e => ({value: e.value, label: e.textContent.trim()}))")
+match = next(e for e in opts if wanted in (e["label"].lower(), ...))
+page.goto("https://www.barchart.com" + match["value"])
+```
+
+Regla: **nunca inventes el formato de un identificador del sitio.** Sondealo
+una vez con un script de dos líneas y programá contra lo que devuelve. Si un
+filtro puede vaciar una lista, que falle ruidoso o devuelva las opciones
+válidas — nunca `[]` sin explicación.
+
+### Cómo debe verse un `check_session` honesto
+
+Devolver **estado desglosado, no un booleano**. Quién, qué plan, y la evidencia
+cruda para depurar sin abrir un navegador:
+
+```json
+{
+  "ok": false,
+  "logged_in_as": "cuenta@ejemplo.com",
+  "plan": "free",
+  "user_block": "LOGIN Try Barchart for Free",
+  "final_url": "https://www.barchart.com/get-barchart-premier?ref=tryPremier"
+}
+```
+
+Para identificar la cuenta, el DOM rara vez sirve. Las **cookies de analytics**
+suelen tener el email en claro y son mucho más estables que cualquier selector:
+
+```python
+# ab.storage.userId.<uuid> guarda "g:<email>|e:...|c:..." doble-urlencoded
+for c in ctx.cookies():
+    if c["name"].startswith("ab.storage.userId"):
+        dec = urllib.parse.unquote(urllib.parse.unquote(c["value"]))
+        m = re.search(r"g:([^|]+@[^|]+)", dec)
+```
+
+### Notas
+
+- **Verificar antes de guardar, no después.** El `setup_login.py` que genera el
+  `storage_state.json` debe comprobar login + plan y **negarse a escribir** si
+  la sesión quedó anónima. Si no, se copia al servidor una sesión inútil que
+  "parece" funcionar — el mismo bug, ahora en producción.
+- **El fix hace visible el problema, no lo cura.** Al arreglar el check, la
+  sesión sigue caída: hay que regenerarla igual. Esperar que el conteo de
+  fallos *suba* tras el fix es lo normal y es buena señal.
+- **Rebuildear el contenedor no basta.** Hermes solo descubre MCPs y sus
+  descripciones al arrancar: si cambian los docstrings de las tools, hace falta
+  `sudo systemctl restart hermes-gateway` o el modelo sigue creyendo la firma
+  vieja (ver patrón #5).
+- Un `check_session` que solo puede decir `true` **no es un check**; es un
+  comentario. Antes de confiar en uno, forzá el caso negativo (borrá las
+  cookies) y comprobá que efectivamente diga `false`.
