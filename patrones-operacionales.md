@@ -1,6 +1,6 @@
 # Patrones operacionales
 
-Tres patrones probados en producción (mayo 2026) que extienden lo cubierto en
+Patrones probados en producción que extienden lo cubierto en
 [ejemplos.md](./ejemplos.md), [cronjobs.md](./cronjobs.md) y
 [instrucciones.md](./instrucciones.md):
 
@@ -11,6 +11,7 @@ Tres patrones probados en producción (mayo 2026) que extienden lo cubierto en
 5. [MCPs que producen archivos: registrar un resource](#5-mcps-que-producen-archivos-registrar-un-resource) — fix del `Unknown resource` cuando un tool devuelve una ruta de archivo.
 6. [MCPs solapados: deshabilitar uno para evitar confusión del modelo](#6-mcps-solapados-deshabilitar-uno-para-evitar-confusión-del-modelo) — dos stacks que cubren la misma función (email/calendario Fastmail vs Google).
 7. [MCPs que scrapean con sesión: que lleguen datos no prueba que la sesión viva](#7-mcps-que-scrapean-con-sesión-que-lleguen-datos-no-prueba-que-la-sesión-viva) — el health check que miente durante meses.
+8. [Entregables agendados sobre una sesión que caduca: avisar y degradar](#8-entregables-agendados-sobre-una-sesión-que-caduca-avisar-y-degradar-no-fallar-en-silencio) — skill de cara al usuario + cron watchdog + renovación humana del login.
 
 Todos se basan en una sola instancia de Hermes corriendo nativa (no Docker —
 esa es la forma upstream del agente; los MCPs sí van en contenedores).
@@ -1024,3 +1025,79 @@ for c in ctx.cookies():
 - Un `check_session` que solo puede decir `true` **no es un check**; es un
   comentario. Antes de confiar en uno, forzá el caso negativo (borrá las
   cookies) y comprobá que efectivamente diga `false`.
+
+## 8. Entregables agendados sobre una sesión que caduca: avisar y degradar, no fallar en silencio
+
+### Por qué
+
+El patrón #7 arregla el *detectar* que una sesión scrapeada murió. Este es el
+paso siguiente: cuando un **skill de cara al usuario** depende de esa sesión —
+"que Renata baje la cadena de opciones y me la mande por correo" — la sesión va
+a caducar tarde o temprano, y el login no se puede rehacer headless (SSO de
+Google + Cloudflare). Si el skill no contempla ese estado, el usuario pide su
+informe y recibe: nada, un error críptico, o —peor— datos de la cuota anónima
+que "parecen" reales. La sesión caduca es el estado *esperado*, no la excepción.
+
+### Caso real (`barchart-options-chain` de Renata, 2026-07-17)
+
+Alvaro pidió por Telegram el informe de opciones de cacao y "no funcionaba". Dos
+causas independientes:
+
+1. La sesión de Barchart (`renata@aroco.co`) estaba caduca → el fetch daba
+   **HTTP 401**. Ningún aviso; el skill simplemente no producía nada.
+2. Aunque hubiera datos, el skill entregaba el CSV crudo por Telegram, no el
+   correo que el usuario esperaba.
+
+### Patrón de solución
+
+**1. El script de fetch distingue "caduca" de "otro error" con un exit code.**
+No basta con que truene; el llamador tiene que poder ramificar.
+
+```python
+try:
+    resp = opener.open(req)
+except urllib.error.HTTPError as e:
+    if e.code in (401, 403):
+        print("SESION_CADUCA", file=sys.stderr); sys.exit(2)   # → renovar login
+    print(f"ERROR_HTTP {e.code}", file=sys.stderr); sys.exit(3) # → reintentar/avisar
+```
+
+**2. El skill verifica ANTES de trabajar y degrada con un mensaje accionable.**
+Si `check_session` (honesto, ver #7) dice caduca, o el fetch sale con exit 2, no
+sigue: avisa por el mismo canal donde se pidió, y dice **exactamente cómo se
+arregla**, no "hubo un error".
+
+> ⚠️ No pude generar el informe: la sesión de Barchart (`renata@aroco.co`) está
+> caducada. Renovarla desde una laptop: `python setup_login.py` (login con
+> Google) → `scp storage_state.json aroco-server:~/projects/data/barchart/` →
+> `docker compose restart` del `barchart-mcp`.
+
+**3. Un cron watchdog detecta la caducidad ANTES de que el usuario la sufra.**
+Mismo patrón que el chequeo de sesión del notetaker Meet: un cron diario corre
+un skill corto que llama `check_session` y **solo** manda Telegram si está caída
+(silencioso si todo bien). Así el aviso llega de mañana, no en medio de la
+reunión / la petición urgente.
+
+- Deliver `local` + el skill manda el Telegram él mismo (`send_message` a cada
+  chat), no `deliver: telegram` — así controlás a quién y con qué texto.
+- **Gotcha:** el cron debe declarar `enabled_toolsets` con el MCP del check y
+  `messaging`; sin eso el modelo alucina la llamada (ver patrón #4). No hay flag
+  en `hermes cron create` — se edita a mano en `cron/jobs.json` (backup primero).
+
+### Reglas generalizables
+
+- **La renovación es un paso humano y hay que decirlo en el skill**, no
+  esconderlo. El agente no puede hacer un SSO interactivo; que no lo intente ni
+  finja que puede. Documentá los comandos de renovación dentro del propio
+  `SKILL.md`.
+- **Verificá salud al principio del turno, no al final.** Descubrir la sesión
+  muerta después de haber "armado" el informe desperdicia el turno y confunde.
+- **El canal de entrega es parte del requisito.** "Mándamelo por correo bonito
+  como las notas de reunión" no es lo mismo que "adjunta el CSV". Ojo con las
+  limitaciones del transporte: `renata-gmail.send_message` **no adjunta
+  archivos** → la tabla va como HTML en el cuerpo; si hace falta un archivo
+  descargable, la vía es Drive con link, no un adjunto.
+- **No se puede probar de punta a punta con la sesión muerta.** Al reescribir un
+  skill así, dejá el aviso/degradación listos y verificá el camino feliz en la
+  primera corrida real tras renovar — en especial que el agente pueda ejecutar
+  los `docker cp/exec` desde su terminal.
