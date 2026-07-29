@@ -98,17 +98,47 @@ container `barchart-mcp` vía `docker cp`/`exec`).
 > `setup_login.py` — ver el patrón #7 de
 > [patrones-operacionales.md](./patrones-operacionales.md).
 
-## Rama B — StoneX (reportes de inteligencia de cacao)
+## Rama B — StoneX (reportes de cacao)
 
-Hoja fija: `AROCO — Informes StoneX (Cacao)`. Fuente: MCP `renata-intel`
-(`get_cocoa_report_pack` / `get_named_reports` / `latest_reports`). Los reportes
-son **narrativos** (Morning Commentary, Ratios, Differentials, Weekly, COT…), así
-que se vuelcan como:
+Hoja fija: `AROCO — Informes StoneX (Cacao)`. Fuente: MCP `renata-intel`. Hay
+**dos tipos** de reporte y se tratan distinto:
 
-- **Pestaña `Índice <fecha>`** — una fila por reporte: *Reporte · Fecha · Resumen*.
-- **Una pestaña por reporte** `<título corto> <fecha>` — el texto **partido en
-  filas** (un párrafo por celda, ≤49k chars). El texto pasa por el LLM para armar
-  las filas; es el costo de dejar narrativa en una hoja.
+### Tabulares — Cocoa Ratios Report y Cocoa Differentials Report
+
+Son **tablas** (ratios / diferenciales por producto y origen + precios
+GBP/EUR/USD), pero vienen dentro de un **PDF gráfico sin líneas de grilla**:
+`pdfplumber.extract_tables()` devuelve 0 tablas y `extract_text()` mezcla los
+glifos. La extracción confiable (validada celda-a-celda contra el PDF renderizado)
+la hace la tool **`get_cocoa_tables()`** del MCP, a **nivel de carácter**:
+
+- Agrupa los `chars` en filas por su coordenada `top`; dentro de cada fila corta
+  columnas por gap horizontal (une los glifos de un número, separa columnas).
+- Devuelve `{found, missing, reports: [{title, report_date, pdf_url, matrix}]}`,
+  con `matrix` = filas/columnas listas para Sheets.
+- El skill vuelca cada `matrix` como **pestaña-tabla de verdad** + una fila con el
+  link al PDF original (para verificación). **No reinterpreta los números**: los
+  pasa tal como los dejó el parser.
+
+Detalle non-obvio del parser: al separar etiquetas pegadas (ej. `23-JulChange` →
+`23-Jul`,`Change`) solo se corta si ambas partes quedan con ≥2 chars — si no,
+partiría incorrectamente tokens como `ExW` en `Ex`,`W`.
+
+> **Fix de sesión (crítico).** Cuando el token del `storage_state` (el que lee el
+> SPA) caduca, StoneX **no devuelve 401**: cae a modo anónimo y sirve un feed
+> **degradado (200) de ~50 artículos** sin los reportes gated — por eso "a veces
+> no encuentra Ratios/Differentials". Se resuelve **proactivamente**
+> (`auth.ensure_storage_state_fresh()`: re-loguea si el token expiró; un refresh
+> del bearer no basta porque no actualiza el localStorage del SPA). Además el
+> login headless dejó de dar falso "Login failed": el banner de cookies bloqueaba
+> el redirect y dejaba la URL en `/login`; ahora se descarta el banner y el éxito
+> se detecta por la aparición del token en localStorage, no por la URL.
+
+### Narrativos — Morning Commentary, Weekly, COT, etc.
+
+Texto: `get_cocoa_report_pack` / `get_named_reports` / `latest_reports`. Se
+vuelcan como **pestaña `Índice <fecha>`** (fila por reporte: *Reporte · Fecha ·
+Resumen*) + **una pestaña por reporte** con el texto **partido en filas** (un
+párrafo por celda, ≤49k chars).
 
 ---
 
