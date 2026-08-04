@@ -225,8 +225,17 @@ dos fases:
   reunión con Meet, `renata-meet.start_attendance`.
 - **Fase B:** `renata-meet.list_jobs(only_unsent_done=true)` → por cada job,
   `get_transcript`, redactar resumen (resumen ejecutivo + decisiones + acciones),
-  enviar con `renata-gmail.send_message(use_html=true)` a
-  `renata@aroco.co, alvaro.acosta@aroco.co, <correo-personal-de-Pablo>`, y `mark_sent`.
+  guardar el **Doc en Drive** (Fase 4), enviar el correo con
+  `renata-gmail.send_message(use_html=true)` a
+  `renata@aroco.co, alvaro.acosta@aroco.co, <correo-personal-de-Pablo>` **con el
+  enlace al Doc**, y `mark_sent`.
+
+  > **Orden Drive → correo (2026-08-04):** antes el correo salía primero y el Doc
+  > después, así que el acta por correo no traía enlace al Doc y había que buscarlo
+  > a mano en Drive. Ahora el Doc se crea primero y su `webViewLink` se incrusta al
+  > final del correo (`Ver notas completas en Google Docs`). El skill lleva un
+  > fallback explícito: **si Drive falla, el correo sale igual sin el enlace** — el
+  > acta nunca se pierde por un fallo de Drive.
 
   > **Auto-copia (2026-07-01):** Renata se incluye a sí misma en el "Para"
   > (`renata@aroco.co`) para que cada informe quede archivado en su propio inbox
@@ -326,8 +335,13 @@ propio de Renata (`token_renata_drive.json`, scope `drive`).
 externas además quedan como "sesión de invitado" que **re-verifica cada 7 días**.
 
 El skill `reunion-notetaker` (Fase B) llama `ensure_folder` + `create_doc` (resumen
-HTML + transcripción al final) tras enviar el correo. Toolset del cron:
+HTML + transcripción al final) **antes** de enviar el correo, para poder incrustar
+el `webViewLink` del Doc en el acta (ver nota en Fase 3 → Skill). Toolset del cron:
 `mcp-renata-drive`.
+
+**El Doc trae más que el correo:** además del resumen ejecutivo, decisiones y tabla
+de acciones, lleva al final la **transcripción completa** de la reunión. Por eso el
+enlace en el correo dice explícitamente "(incluye la transcripción)".
 
 ## Mantenimiento — sesión de Google del bot Meet (caduca cada ciertas semanas)
 
@@ -378,9 +392,13 @@ Fase 2 (sembrar en la Mac y subir), repetido.
    python3 -m venv venv && source venv/bin/activate
    pip install playwright && python3 -m playwright install chromium
    ```
-2. Guardar `reseed_renata.py` (headed; abre Google, esperas a estar DENTRO como
-   `renata@aroco.co`, pulsas Enter, comprueba Meet y guarda el archivo solo si NO
-   rebotó al login):
+2. Bajar `reseed_renata.py` — está versionado en este repo, en
+   [`scripts/reseed_renata.py`](./scripts/reseed_renata.py):
+   ```bash
+   scp aroco@<server>:/home/aroco/projects/repos/hermes-agent/scripts/reseed_renata.py .
+   ```
+   (headed; abre Google, esperas a estar DENTRO como `renata@aroco.co`, pulsas
+   Enter, comprueba Meet y guarda el archivo solo si NO rebotó al login):
    ```python
    from playwright.sync_api import sync_playwright
    OUT = "storage_state_renata.json"
@@ -411,32 +429,71 @@ Fase 2 (sembrar en la Mac y subir), repetido.
    `status:"in_call"` con `list_jobs` — deberías ver a Renata entrar.
 
 > El `storage_state.json` lleva las cookies de sesión de Renata: **sensible**, no
-> commitear ni compartir.
+> commitear ni compartir. Borrarlo de la Mac al terminar.
 
-### Chequeo diario automático (cron `Notetaker chequeo sesion`) ✅
+### Historial de caducidades
+
+| Caducó | Se detectó | Reuniones perdidas | Cómo nos enteramos |
+|---|---|---|---|
+| ~2026-07-09 | 2026-07-14 | todas del 9 al 14-jul | Pablo lo notó → se creó el cron de chequeo |
+| 2026-07-27 | 2026-08-04 | ~11 (3 comités el 3-ago; "Revisión CRM y Plataformas" el 4-ago) | Pablo lo notó otra vez — el cron **sí** detectaba pero no avisaba (ver gotcha abajo) |
+
+Duración observada de la cookie: **2–3 semanas** sin asistencias que la renueven.
+Re-sembrada el 2026-08-04 a las 16:04 (`logged_in:true`, `meet.google.com/home`).
+
+### Chequeo automático de sesión (cron `Notetaker chequeo sesion`) ✅
 
 Desplegado 2026-07-14 para no volver a enterarse por una reunión perdida. Corre
-`verify_session` cada mañana y **avisa por Telegram SOLO si la sesión caducó**;
-si está sana, calla.
+`verify_session` y **avisa por Telegram SOLO si la sesión caducó**; si está sana,
+calla. Horario: **`30 6,9,12,15 * * *`** (4 veces al día, ampliado 2026-08-04 —
+con un solo chequeo a las 6:30 una caducidad de media mañana costaba el día
+entero de reuniones).
 
 - Skill: `~/.hermes-renata/skills/note-taking/reunion-sesion-check/SKILL.md`
-  — llama `renata-meet.verify_session`; si `logged_in:false` manda `send_message`
-  a Pablo y Álvaro (targets `telegram:<chat_id>`) con el aviso + recordatorio del
-  re-sembrado; si `logged_in:true` responde `[SILENT]` (marcador que suprime la
-  entrega — solo queda en el log de auditoría).
-- Cron:
-  ```bash
-  hermes cron create "30 6 * * *" "Ejecuta el skill reunion-sesion-check..." \
-    --name "Notetaker chequeo sesion" --skill reunion-sesion-check --deliver local
-  ```
-  Toolsets (`enabled_toolsets`): **`mcp-renata-meet`, `messaging`** — el mismo
-  gotcha de siempre (la CLI no fija `enabled_toolsets`: editar `cron/jobs.json` +
-  `systemctl reload`, ver [cronjobs.md](./cronjobs.md)). Sin `messaging` el agente
-  no tendría `send_message` para avisar.
-- Por qué `--deliver local` y no `--deliver telegram`: se avisa **condicional**
-  (solo al fallar) desde el propio skill con `send_message` a destinatarios
-  explícitos; `deliver:telegram` postearía en cada corrida (y además
-  `TELEGRAM_HOME_CHANNEL` no está configurado en Renata).
+  — llama `renata-meet.verify_session`; si `logged_in:false` **responde el texto
+  del aviso** (lo entrega el cron); si `logged_in:true` responde `[SILENT]`
+  (marcador que suprime la entrega — solo queda en el log de auditoría).
+- Cron: `deliver = telegram:<chat_id_pablo>,telegram:<chat_id_alvaro>` (Pablo + Álvaro;
+  `deliver` acepta varios destinos separados por coma).
+
+#### ⚠️ Gotcha crítico: `send_message` NO existe dentro de un cron
+
+**Un cron no puede avisar llamando `send_message`, por más que su
+`enabled_toolsets` incluya `messaging`.** El scheduler lo desactiva a la fuerza:
+
+```python
+# cron/scheduler.py — construcción del AIAgent
+enabled_toolsets=_resolve_cron_enabled_toolsets(job, _cfg),
+disabled_toolsets=["cronjob", "messaging", "clarify"],   # <— pisa el job
+```
+
+**Cómo se manifiesta (falla silenciosa, la peor clase):** el agente detecta bien
+el problema, no encuentra `send_message`, asume que "el sistema" entregará su
+texto y responde algo como `AVISO ENVIADO — sesión caducada`. El cron queda en
+`last_status: ok`. Nadie recibe nada. Verificado en producción: **del 28-jul al
+4-ago de 2026 el chequeo detectó la caducidad todos los días y ningún aviso
+llegó**; se perdieron ~11 reuniones (3 comités el 3-ago) y nos enteramos porque
+Pablo lo notó.
+
+**El patrón correcto para cualquier cron que deba avisar condicionalmente:**
+
+1. `deliver` = los destinos reales (`telegram:<chat_id>,telegram:<chat_id>`), no
+   `local`.
+2. El skill **responde el aviso como su texto final** — el scheduler lo entrega.
+3. Para el caso "todo bien", responder `[SILENT]`: suprime la entrega
+   (`cron/scheduler.py:SILENT_MARKER`). Así el aviso sigue siendo condicional
+   sin depender de `send_message`.
+4. En el skill, prohibir explícitamente llamar herramientas de envío y decir
+   "no digas AVISO ENVIADO" — si no, el modelo alucina la entrega.
+
+**Diagnóstico rápido** de si un cron pudo avisar: abrir
+`~/.hermes-renata/sessions/session_cron_<id>_<TS>.json` y mirar la clave `tools`
+— es la lista real de herramientas que tuvo. Si `send_message` no está ahí, no
+envió nada. Y revisar `last_delivery_error` en `cron/jobs.json`: `None` con
+`deliver` ≠ `local` significa entrega OK.
+
+> El mismo bug afectaba a `Barchart chequeo sesion` (`ad5af3d40798`); corregido
+> igual el 2026-08-04.
 
 ## Futuro ⏳
 
