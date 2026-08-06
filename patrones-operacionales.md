@@ -12,6 +12,7 @@ Patrones probados en producción que extienden lo cubierto en
 6. [MCPs solapados: deshabilitar uno para evitar confusión del modelo](#6-mcps-solapados-deshabilitar-uno-para-evitar-confusión-del-modelo) — dos stacks que cubren la misma función (email/calendario Fastmail vs Google).
 7. [MCPs que scrapean con sesión: que lleguen datos no prueba que la sesión viva](#7-mcps-que-scrapean-con-sesión-que-lleguen-datos-no-prueba-que-la-sesión-viva) — el health check que miente durante meses.
 8. [Entregables agendados sobre una sesión que caduca: avisar y degradar](#8-entregables-agendados-sobre-una-sesión-que-caduca-avisar-y-degradar-no-fallar-en-silencio) — skill de cara al usuario + cron watchdog + renovación humana del login.
+9. [Automatizar UI ajena: verificar el efecto, no el intento](#9-automatizar-ui-ajena-verificar-el-efecto-no-el-intento) — el click que "funciona" y no hace nada; instrumentar y avisar, no solo arreglar.
 
 Todos se basan en una sola instancia de Hermes corriendo nativa (no Docker —
 esa es la forma upstream del agente; los MCPs sí van en contenedores).
@@ -1078,11 +1079,25 @@ un skill corto que llama `check_session` y **solo** manda Telegram si está caí
 (silencioso si todo bien). Así el aviso llega de mañana, no en medio de la
 reunión / la petición urgente.
 
-- Deliver `local` + el skill manda el Telegram él mismo (`send_message` a cada
-  chat), no `deliver: telegram` — así controlás a quién y con qué texto.
-- **Gotcha:** el cron debe declarar `enabled_toolsets` con el MCP del check y
-  `messaging`; sin eso el modelo alucina la llamada (ver patrón #4). No hay flag
-  en `hermes cron create` — se edita a mano en `cron/jobs.json` (backup primero).
+- > ❌ **Corregido 2026-08-04 — esto era exactamente al revés.** Aquí decía
+  > "deliver `local` + el skill manda el Telegram él mismo con `send_message`".
+  > **No funciona:** el scheduler construye el agente con
+  > `disabled_toolsets=["cronjob","messaging","clarify"]`, que pisa el
+  > `messaging` del job. El agente no encuentra la tool, **asume que el sistema
+  > entregará su texto y responde "AVISO ENVIADO"** — el cron queda
+  > `last_status: ok` y nadie recibe nada. Costó 8 días de avisos perdidos y
+  > ~11 reuniones. Seguir este bullet como estaba reproduce el bug.
+- **Lo correcto:** `deliver` = los destinos reales
+  (`telegram:<chat_id>,telegram:<chat_id>`, acepta varios por coma), el skill
+  **responde el aviso como su texto final**, y responde `[SILENT]` cuando todo
+  está bien (suprime la entrega, `cron/scheduler.py:SILENT_MARKER`). En el skill,
+  prohibir explícitamente las tools de envío y el "AVISO ENVIADO".
+- **Ojo con la frecuencia del cron al aplicar `[SILENT]`:** en un watchdog diario
+  un `[SILENT]` de más es inocuo; en un cron `*/15` son ~56 mensajes/día. Probar
+  el camino "todo bien" antes de dejarlo en producción.
+- **Gotcha:** el cron debe declarar `enabled_toolsets` con el MCP del check (el
+  `messaging` es inútil, ver arriba); sin eso el modelo alucina la llamada (ver
+  patrón #4). `hermes cron edit --deliver` preserva `enabled_toolsets`.
 
 ### Reglas generalizables
 
@@ -1101,3 +1116,50 @@ reunión / la petición urgente.
   skill así, dejá el aviso/degradación listos y verificá el camino feliz en la
   primera corrida real tras renovar — en especial que el agente pueda ejecutar
   los `docker cp/exec` desde su terminal.
+
+---
+
+## 9. Automatizar UI ajena: verificar el efecto, no el intento
+
+Descubierto en el notetaker de Renata (2026-08-06): durante ~6 semanas el bot
+entró a las reuniones y grabó **0 líneas en el 34% de los casos**, sin un solo
+error en ningún log. El código hacía esto:
+
+```python
+await _enable_captions(page)   # click en "Subtítulos"; el bool se descartaba
+```
+
+El click "funcionaba" (encontraba un botón, lo clickeaba) pero los subtítulos no
+quedaban activos, y el bot pasaba dos horas leyendo una región del DOM que no
+existía. Caso completo en `renata-notetaker-reuniones.md`.
+
+### Reglas generalizables
+
+- **El predicado correcto no es "¿se ejecutó mi acción?" sino "¿existe el estado
+  que la acción debía producir?".** Verificar contra **el mismo selector/recurso
+  que consume el código de abajo** — así la comprobación significa algo. Un
+  `click()` que no lanza excepción no prueba nada sobre la UI de un tercero.
+- **Cuidado con los controles *toggle*.** Reintentar un click sobre un toggle no
+  es idempotente: puede *deshacer* lo que ya estaba bien. Verificar **antes** de
+  clickear, no solo después.
+- **Un proceso largo debe verificar sus precondiciones al arrancar, no al
+  entregar.** Dos horas de captura sobre un estado inválido son dos horas
+  perdidas; el chequeo cuesta segundos y va antes del bucle.
+- **Registrar el resultado del chequeo en el artefacto** (aquí `captions_ok` en
+  el job). Sin eso no se distingue "el mecanismo falló" de "no había nada que
+  capturar", y la falla se vuelve indiagnosticable a posteriori. El campo es
+  además lo que permite que el aviso diga *por qué*.
+- **"Vacío" casi nunca es un caso normal — no lo trates como éxito.** El skill
+  marcaba `sent` ante una transcripción vacía y la reunión desaparecía sin
+  rastro. Un resultado vacío en un proceso que debía producir algo es una
+  **falla que hay que reportar**, y el aviso debe llegar a un humano.
+- **Los tres cambios van juntos: arreglar, instrumentar, avisar.** Solo el
+  arreglo deja el sistema igual de opaco ante el próximo cambio de UI de Google
+  — que va a ocurrir.
+
+### Cómo probarlo sin el sistema externo
+
+La lógica de reintento/verificación se testea con un doble del `Page` que
+simule "el estado aparece tras N intentos" — sin Meet, sin red, en segundos.
+Casos mínimos: **funciona al 1er intento** · **se rinde tras N** · **0 acciones
+si ya estaba en el estado deseado** (el toggle) · **reintenta y logra**.

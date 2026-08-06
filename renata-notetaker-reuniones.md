@@ -159,7 +159,9 @@ afinar contra una reunión real (UI en español):
   click `force=True`.
 - **Subtítulos:** botón `aria-label="Activar subtítulos"`; texto en
   `div[role="region"][aria-label="Subtítulos"]`, cada bloque `div.nMcdL`, nombre
-  en `span.NWpY1d`.
+  en `span.NWpY1d`. ⚠️ El botón es un **toggle** y el click falla en silencio si
+  la barra no renderizó: hay que **verificar que la región existe**, no confiar
+  en el click (ver "Mantenimiento — transcripciones vacías").
 - **Idioma:** por defecto reconocía español como inglés. Hay que abrir "Ajustes
   de subtítulos" → combobox "Idioma de la reunión" → "Español (México)".
 - **Meet reescribe el enunciado en vivo** (corrige, cambia mayúsculas) → un
@@ -345,6 +347,10 @@ enlace en el correo dice explícitamente "(incluye la transcripción)".
 
 ## Mantenimiento — sesión de Google del bot Meet (caduca cada ciertas semanas)
 
+> Esta sección cubre la falla "**no entra**" (`status:"error"`). Si el job dice
+> `done` con `lines:0`, es la otra falla → "Mantenimiento — transcripciones
+> vacías", más abajo.
+
 La sesión web sembrada (`storage_state.json`, ver Fase 2) **caduca sola**. El bot
 la re-guarda tras **cada asistencia exitosa**, así que mientras hay reuniones se
 renueva sola; pero si pasan varios días sin una asistencia OK (o Google invalida
@@ -494,6 +500,129 @@ envió nada. Y revisar `last_delivery_error` en `cron/jobs.json`: `None` con
 
 > El mismo bug afectaba a `Barchart chequeo sesion` (`ad5af3d40798`); corregido
 > igual el 2026-08-04.
+
+## Mantenimiento — transcripciones vacías (la OTRA falla)
+
+> **Antes de diagnosticar, separar las dos fallas.** Se confunden porque el
+> resultado visible es el mismo ("no llegaron las notas"), pero la causa y el
+> remedio no tienen nada que ver:
+>
+> | Job dice | Falla | Sección |
+> |---|---|---|
+> | `status:"error"`, `"no se pudo entrar"` | no entra → sesión caducada | la anterior |
+> | `status:"done"` con **`lines:0`** | entra pero no captura | **esta** |
+
+### Síntoma
+
+El job queda **`done`** y **`sent:true`** — aparentemente todo bien —, pero el
+archivo en `/data/transcripts/` pesa **0 bytes** y nunca llegó ni correo ni Doc.
+Comparando `created` vs `updated` se ve que el bot **estuvo la reunión entera**
+(1-2 h) grabando nada. No hay error en ninguna parte: por eso pasó desapercibido
+meses.
+
+**Frecuencia real medida el 2026-08-06:** 11 de las 32 reuniones a las que sí
+logró entrar salieron vacías (**~34%**), entre el 26-jun y el 6-ago.
+
+### Causa raíz
+
+`_enable_captions` hacía un click por texto sobre "Subtítulos" y **descartaba el
+booleano que devolvía**:
+
+```python
+await _enable_captions(page)      # ← el resultado se tiraba
+await _set_caption_language(page)
+```
+
+Si la barra inferior aún no había renderizado (se auto-oculta, ver Fase 2) o
+Google cambiaba la etiqueta, el click fallaba **en silencio** y el bot pasaba
+horas leyendo `div[role="region"][aria-label="Subtítulos"]`, una región que
+nunca llegó a existir.
+
+**Bug latente adicional:** el botón de subtítulos es un **toggle**. Si Meet ya
+los traía activos (recuerda la preferencia entre reuniones), el click los
+**apagaba** — el "arreglo" ingenuo de clickear más veces habría empeorado la cosa.
+
+### Arreglo (2026-08-06) — los tres cambios van juntos
+
+**1. Verificar el DOM en vez de confiar en el click** (`meet_bot.py`):
+
+```python
+async def _captions_active(page) -> bool:
+    """True si la región de subtítulos está montada. Mismo selector que
+    CaptionCollector: si no está, la captura es imposible."""
+    for sel in _CAP_SELECTORS:
+        if await page.query_selector(sel):
+            return True
+    return False
+
+async def _enable_captions(page, attempts: int = 3) -> bool:
+    for i in range(attempts):
+        if await _captions_active(page):
+            return True          # ya activos → NO clickear (es toggle)
+        await _click_by_text(page, _RE_CAPTIONS, timeout=6000)
+        for _ in range(10):      # la región tarda en montarse
+            await page.wait_for_timeout(500)
+            if await _captions_active(page):
+                return True
+        ...
+```
+
+El predicado correcto no es "¿se pudo clickear?" sino **"¿existe la región que
+el colector va a leer?"**. Verificar contra el mismo selector que consume el
+código de captura es lo que hace la comprobación significativa.
+
+**2. Registrar el resultado.** El job guarda `captions_ok` y `caption_language`,
+y `list_jobs` los expone. Estado `in_call_sin_subtitulos` cuando entra pero no
+logra activarlos. Jobs anteriores al fix → `captions_ok: null`. Sin esto no hay
+forma de distinguir "los subtítulos fallaron" de "nadie habló".
+
+**3. Avisar en vez de callar.** El skill `reunion-resumen` marcaba `sent` y
+terminaba cuando la transcripción venía vacía — la reunión se evaporaba sin
+rastro. Ahora responde un aviso que el cron entrega por Telegram:
+
+```
+⚠️ Reunión sin transcripción
+Reunión: <título> (<start_at>)
+Motivo probable: <según captions_ok: false → "no se pudieron activar los
+subtítulos"; true → "se activaron pero nadie habló"; null → "desconocido">
+Fin: <ended_reason> · líneas: <lines>
+```
+
+### ⚠️ El cron de resumen tenía `deliver: local`
+
+`Notetaker resumen` (`9938e112e700`) entregaba a `local`, o sea **a nadie**. El
+aviso del punto 3 no habría llegado por más bien redactado que estuviera.
+Cambiado a `telegram:<pablo>,telegram:<alvaro>` — mismo patrón condicional que
+el chequeo de sesión (ver el gotcha de `send_message` arriba).
+
+**Cuidado con la frecuencia:** este cron corre **cada 15 min de 6 a 19h** (56
+corridas/día), muy distinto del chequeo de sesión (4/día). El skill **debe**
+responder `[SILENT]` cuando no hay pendientes *y* cuando el envío ya salió por
+correo. Si no, son ~56 mensajes de Telegram al día. Verificado antes de dejarlo
+en producción.
+
+### Probar sin una reunión en vivo
+
+La lógica de captions se puede testear **sin Meet**, con un `Page` falso que
+simule "la región aparece tras N clicks":
+
+```bash
+docker cp test_captions.py renata-meet-mcp:/tmp/ && \
+  docker exec renata-meet-mcp python /tmp/test_captions.py
+```
+
+Casos que deben pasar: activa al 1er click · devuelve `False` tras 3 intentos
+fallidos · **0 clicks si ya estaban activos** (el toggle) · reintenta y logra.
+
+Para el aviso, la receta de la Fase B (más arriba) pero sembrando el job con
+`"lines": 0, "captions_ok": false`. **Poner `deliver local` durante la prueba**
+para no mandar mensajes de test al equipo, y restaurar el destino real después.
+
+### Pendiente
+
+`max_minutes = 120` corta las reuniones largas: la del 2026-08-05 terminó con
+`ended_reason: max_minutes` y la reunión seguía viva. Subirlo a 240 y anotar en
+las notas cuando el corte sea por límite.
 
 ## Futuro ⏳
 
