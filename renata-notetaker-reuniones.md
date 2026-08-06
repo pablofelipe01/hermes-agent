@@ -525,11 +525,13 @@ logró entrar salieron vacías (**~34%**), entre el 26-jun y el 6-ago.
 
 ### Causa raíz
 
-`_enable_captions` hacía un click por texto sobre "Subtítulos" y **descartaba el
-booleano que devolvía**:
+Son **dos defectos encadenados**. El segundo se descubrió volcando el DOM de una
+reunión real y es el que invalidaba cualquier reintento.
+
+**(a) El resultado del click se descartaba.**
 
 ```python
-await _enable_captions(page)      # ← el resultado se tiraba
+await _enable_captions(page)      # ← el booleano se tiraba
 await _set_caption_language(page)
 ```
 
@@ -538,9 +540,37 @@ Google cambiaba la etiqueta, el click fallaba **en silencio** y el bot pasaba
 horas leyendo `div[role="region"][aria-label="Subtítulos"]`, una región que
 nunca llegó a existir.
 
+**(b) El regex del botón era ambiguo — y por eso reintentar no servía.**
+
+`_RE_CAPTIONS = /(subt[íi]tulos|captions)/` matchea **tres** botones distintos, y
+`_click_by_text` clickea el primero en orden de documento:
+
+| # | `aria-label` | Efecto |
+|---|---|---|
+| 1 | **Abrir ajustes de subtítulos** ← se clickeaba este | abre un panel |
+| 2 | Ir a los subtítulos más recientes | scroll |
+| 3 | Activar/Desactivar subtítulos | **el toggle real** |
+
+En una sala recién abierta solo existe "Activar subtítulos" y el click acierta —
+por eso funcionaba a veces. Pero en cuanto el panel de ajustes está en el DOM,
+el primer match pasa a ser "Abrir ajustes de subtítulos": el bot abre un panel,
+cree que activó la captura y **los tres reintentos caen en el mismo botón
+equivocado**. Un mecanismo de recuperación que no puede recuperarse.
+
+> ⚠️ Con el toggle en un label y sus *ajustes* en otro que comparte la palabra,
+> anclar el patrón (`^activar subtítulos$`) no es cosmético: es la diferencia
+> entre activar la captura y abrir un menú.
+
 **Bug latente adicional:** el botón de subtítulos es un **toggle**. Si Meet ya
 los traía activos (recuerda la preferencia entre reuniones), el click los
 **apagaba** — el "arreglo" ingenuo de clickear más veces habría empeorado la cosa.
+
+### Lo que quedó sin explicar
+
+En la reunión del 2026-08-06 el primer intento debió acertar (sala nueva = un
+solo match) y aun así `captions_ok` salió `false`. **No sabemos por qué falló ese
+primer click**, y una sala vacía no reproduce el fallo: ahí activa bien. Por eso
+el fix incluye volcar evidencia (abajo) en vez de seguir conjeturando.
 
 ### Arreglo (2026-08-06) — los tres cambios van juntos
 
@@ -559,11 +589,14 @@ async def _enable_captions(page, attempts: int = 3) -> bool:
     for i in range(attempts):
         if await _captions_active(page):
             return True          # ya activos → NO clickear (es toggle)
-        await _click_by_text(page, _RE_CAPTIONS, timeout=6000)
-        for _ in range(10):      # la región tarda en montarse
-            await page.wait_for_timeout(500)
-            if await _captions_active(page):
+        if await _find_by_label(page, _RE_CAPTIONS_OFF):   # "Desactivar..." = ya puestos
+            if await _wait_captions_mounted(page, 4):
                 return True
+        if await _click_by_text(page, _RE_CAPTIONS_ON, timeout=6000):
+            if await _wait_captions_mounted(page):         # 8 s, no 5
+                return True
+        elif await _enable_captions_via_menu(page):        # fallback: menú ⋮
+            return True
         ...
 ```
 
@@ -571,10 +604,42 @@ El predicado correcto no es "¿se pudo clickear?" sino **"¿existe la región qu
 el colector va a leer?"**. Verificar contra el mismo selector que consume el
 código de captura es lo que hace la comprobación significativa.
 
-**2. Registrar el resultado.** El job guarda `captions_ok` y `caption_language`,
-y `list_jobs` los expone. Estado `in_call_sin_subtitulos` cuando entra pero no
-logra activarlos. Jobs anteriores al fix → `captions_ok: null`. Sin esto no hay
-forma de distinguir "los subtítulos fallaron" de "nadie habló".
+**Labels anclados** (`_RE_CAPTIONS_ON` / `_OFF`), por el defecto (b) de arriba, y
+**fallback al menú ⋮** (`_enable_captions_via_menu`) para cuando Meet colapsa el
+toggle fuera de la barra.
+
+**2. Registrar el resultado.** El job guarda `captions_ok`, `caption_language` y
+`captions_debug`, publicados **apenas se saben** (callback `meta_cb`, separado
+del `status_cb`) para que el fallo sea visible en vivo. `list_jobs` los expone.
+Jobs anteriores al fix → `captions_ok: null`. Sin esto no hay forma de distinguir
+"los subtítulos fallaron" de "nadie habló".
+
+**2-bis. Evidencia al fallar** (`_dump_captions_failure`): screenshot + todos los
+`aria-label` de la barra en `/data/debug/captions_fail_<ts>.{png,txt}`. Una sala
+vacía **no reproduce** el fallo — sin esta foto del momento exacto, diagnosticar
+un fallo en reunión real es conjeturar.
+
+> ### ⚠️ No metas una dimensión ortogonal dentro del `status`
+>
+> El primer intento de (2) marcaba `status = "in_call_sin_subtitulos"`. Parecía
+> inocuo y rompió el **anti-duplicado** de `start_attendance`, que comparaba
+> contra una lista blanca de estados:
+>
+> ```python
+> if j.get("status") in ("queued","waiting","joining","in_call","done"):   # ← el nuevo no está
+> ```
+>
+> El cron no reconoció el estado, lo trató como reunión sin atender y **lanzó una
+> segunda Renata a una reunión en curso** (2026-08-06, 17:15). Se salvó porque
+> Google no admite la misma cuenta dos veces en la misma sala y la segunda murió
+> con `no_join_button`.
+>
+> Dos lecciones:
+> - El `status` es el **avance** del job. Si los subtítulos van bien o mal es otra
+>   dimensión → campo aparte (`captions_ok`), nunca un estado más.
+> - El anti-duplicado ahora usa **lista negra** (`_RETRYABLE_STATUSES = ("error",)`):
+>   cualquier estado que no sea fallo terminal bloquea el duplicado. Así, añadir un
+>   estado nuevo falla del lado seguro en vez de reabrir el agujero en silencio.
 
 **3. Avisar en vez de callar.** El skill `reunion-resumen` marcaba `sent` y
 terminaba cuando la transcripción venía vacía — la reunión se evaporaba sin
@@ -617,6 +682,27 @@ fallidos · **0 clicks si ya estaban activos** (el toggle) · reintenta y logra.
 Para el aviso, la receta de la Fase B (más arriba) pero sembrando el job con
 `"lines": 0, "captions_ok": false`. **Poner `deliver local` durante la prueba**
 para no mandar mensajes de test al equipo, y restaurar el destino real después.
+
+> ⚠️ **Un test verde aquí no significa que funcione en una reunión real.** El
+> `Page` falso valida la lógica de reintento, no la UI de Google. Y una sala
+> vacía tampoco sirve de prueba: ahí los subtítulos activan bien y el fallo del
+> 2026-08-06 **no se reproduce**. El único diagnóstico fiable de un fallo real es
+> el volcado de `_dump_captions_failure` de esa reunión.
+
+**Inspeccionar el DOM real** (sala vacía, no molesta a nadie — el link de una
+reunión terminada sigue vivo):
+
+```bash
+# vuelca screenshot + HTML a /data/debug
+capture_debug(url="https://meet.google.com/<code>")
+```
+
+Luego, sobre el HTML, listar **en orden de documento** los botones que matchea un
+patrón antes de confiar en él — así se descubrió el defecto (b):
+
+```python
+hits = [lab for tag in botones if RX.search(lab)]   # el bot clickea hits[0]
+```
 
 ### Pendiente
 

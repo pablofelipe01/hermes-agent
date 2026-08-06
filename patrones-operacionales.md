@@ -1139,6 +1139,14 @@ existía. Caso completo en `renata-notetaker-reuniones.md`.
   que la acción debía producir?".** Verificar contra **el mismo selector/recurso
   que consume el código de abajo** — así la comprobación significa algo. Un
   `click()` que no lanza excepción no prueba nada sobre la UI de un tercero.
+- **Un selector por texto es ambiguo hasta que demuestres lo contrario.** El
+  regex `/subtítulos/` matcheaba tres botones ("Abrir ajustes de subtítulos",
+  "Ir a los subtítulos más recientes", el toggle real) y el helper clickeaba el
+  primero en orden de documento — abría un panel y reportaba éxito. **Listá todos
+  los elementos que matchea tu patrón, en orden, contra el DOM real** antes de
+  confiar en él; y anclá los labels (`^activar subtítulos$`). Corolario: cuando
+  el patrón es ambiguo, **reintentar no arregla nada** — los N intentos caen en
+  el mismo elemento equivocado.
 - **Cuidado con los controles *toggle*.** Reintentar un click sobre un toggle no
   es idempotente: puede *deshacer* lo que ya estaba bien. Verificar **antes** de
   clickear, no solo después.
@@ -1156,6 +1164,20 @@ existía. Caso completo en `renata-notetaker-reuniones.md`.
 - **Los tres cambios van juntos: arreglar, instrumentar, avisar.** Solo el
   arreglo deja el sistema igual de opaco ante el próximo cambio de UI de Google
   — que va a ocurrir.
+- **Instrumentá para el fallo que NO podés reproducir.** El fallo ocurría en
+  reuniones con gente y una sala vacía no lo reproduce: sin volcar screenshot +
+  labels *en el momento del fallo real*, el diagnóstico es conjetura. Si no podés
+  reproducir en laboratorio, la instrumentación no es un extra — es el único
+  camino a la causa.
+- **No metas una dimensión ortogonal dentro de un enum existente.** Marcar
+  `status = "in_call_sin_subtitulos"` (avance del job + salud de los subtítulos
+  en el mismo campo) rompió en silencio un anti-duplicado que comparaba contra
+  una lista blanca de estados, y lanzó un segundo bot a una reunión en curso.
+  Dimensión nueva → **campo nuevo**.
+- **Preferí lista negra a lista blanca en los guardas.** `status not in
+  ("error",)` falla del lado seguro cuando aparece un estado nuevo; `status in
+  (...largo...)` deja el agujero abierto sin que nadie se entere. Toda lista
+  blanca de estados es una bomba de tiempo para el próximo que añada uno.
 
 ### Cómo probarlo sin el sistema externo
 
