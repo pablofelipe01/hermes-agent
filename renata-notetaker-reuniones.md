@@ -704,11 +704,17 @@ patrón antes de confiar en él — así se descubrió el defecto (b):
 hits = [lab for tag in botones if RX.search(lab)]   # el bot clickea hits[0]
 ```
 
-### Pendiente
+### Resueltos después del fix inicial
 
-`max_minutes = 120` corta las reuniones largas: la del 2026-08-05 terminó con
-`ended_reason: max_minutes` y la reunión seguía viva. Subirlo a 240 y anotar en
-las notas cuando el corte sea por límite.
+- **`max_minutes` 120 → 240** (2026-08-06). Con 120 la reunión del 5-ago terminó
+  en `ended_reason: max_minutes` con la reunión aún viva. Sigue pendiente que las
+  notas **digan** que se cortó por límite en vez de callarlo.
+- **`start_at` en `list_jobs`.** El primer aviso real de reunión vacía salió con
+  la hora `2026-08-06T21:45:56` para una reunión de las 17:00: el skill pide la
+  hora de inicio, `list_jobs` no la exponía y el modelo cayó en `created`, que es
+  UTC y marca cuándo se creó el job, no cuándo era la reunión. **Un campo que el
+  skill necesita y el tool no expone no da error: da un dato plausible y
+  equivocado.**
 
 ## Futuro ⏳
 
