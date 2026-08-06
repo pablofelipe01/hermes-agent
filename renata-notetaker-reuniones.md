@@ -707,8 +707,12 @@ hits = [lab for tag in botones if RX.search(lab)]   # el bot clickea hits[0]
 ### Resueltos después del fix inicial
 
 - **`max_minutes` 120 → 240** (2026-08-06). Con 120 la reunión del 5-ago terminó
-  en `ended_reason: max_minutes` con la reunión aún viva. Sigue pendiente que las
-  notas **digan** que se cortó por límite en vez de callarlo.
+  en `ended_reason: max_minutes` con la reunión aún viva.
+- **Aviso de corte por límite.** Con `ended_reason: max_minutes` el skill encabeza
+  correo y Doc con "⚠️ Transcripción incompleta" y tiene prohibido cerrar con
+  conclusiones finales — no sabe cómo acabó la reunión. Con `alone` /
+  `meeting_ended` no pone nada. Sin esto, unas notas truncadas se leen igual que
+  unas completas: **el lector no tiene forma de saber que falta el final.**
 - **`start_at` en `list_jobs`.** El primer aviso real de reunión vacía salió con
   la hora `2026-08-06T21:45:56` para una reunión de las 17:00: el skill pide la
   hora de inicio, `list_jobs` no la exponía y el modelo cayó en `created`, que es
