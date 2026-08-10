@@ -1185,3 +1185,52 @@ La lógica de reintento/verificación se testea con un doble del `Page` que
 simule "el estado aparece tras N intentos" — sin Meet, sin red, en segundos.
 Casos mínimos: **funciona al 1er intento** · **se rinde tras N** · **0 acciones
 si ya estaba en el estado deseado** (el toggle) · **reintenta y logra**.
+
+### Segunda ronda (2026-08-10): el selector era correcto y aun así fallaba
+
+Cuatro días después del arreglo de arriba, el mismo síntoma volvió. La causa no
+estaba en nuestro código: **otro notetaker (Read AI, puesto por otra persona del
+equipo) abría un modal de consentimiento que tapaba la barra entera**. El botón
+correcto estaba en el DOM; el modal se comía el click. Reglas nuevas:
+
+- **"Está en el DOM" no es "se puede pulsar".** Cuando un selector verificado no
+  produce efecto, la pregunta ya no es *"¿es el selector correcto?"* sino
+  **"¿hay algo encima?"**. Un screenshot lo contesta en 5 segundos; inspeccionar
+  el DOM no — el elemento aparece presente y visible. Y ojo: el `force: True` de
+  Playwright **no** salva un modal; despacha el click y la app lo ignora.
+- **No estás solo en el entorno del tercero.** Una UI ajena y compartida cambia
+  no solo porque su dueño la actualice, sino porque **aparecen otros actores**
+  (otro bot, otro plugin, otra política). El fallo empezó en agosto y no antes
+  porque Read AI no existía en la sala en julio. Al fechar un fallo, preguntar
+  *"¿qué cambió alrededor?"*, no solo *"¿qué cambiamos nosotros?"*.
+- **Descartar obstáculos periódicamente, no solo al arrancar.** El modal no
+  aparece al entrar: aparece cuando al otro bot le da la gana, a mitad de
+  reunión. Una precondición que se verifica una vez es una precondición que se
+  pierde.
+- **Para pulsar a ciegas, lista BLANCA — aquí sí.** Es la excepción a la regla de
+  arriba (guardas → lista negra): un guarda debe fallar cerrando, pero **una
+  acción sobre un botón desconocido debe no ocurrir**. En la misma pantalla
+  convivían "Cancelar" y "Iniciar Read AI" (compartir el audio de un comité con
+  un tercero) y "Salir de la llamada". El criterio: *lista negra para decidir si
+  sigo; lista blanca para decidir si actúo.*
+- **Soltar un recurso compartido también hay que verificarlo.** Salir mal de la
+  sala dejaba una sesión fantasma, y entonces el servicio ofrecía "Cambiar aquí"
+  en vez de "Unirse ahora" y **todas las entradas siguientes fallaban**. Un
+  `finally` que *intenta* liberar y no comprueba nada se lee como correcto y deja
+  deuda invisible. **Colgar mal no falla hoy: falla mañana**, y el error aparece
+  lejos de su causa — lo habíamos atribuido a credenciales caducadas.
+- **Sin logs, cada incidente se investiga desde cero.** El bot no emitía una sola
+  línea; el diagnóstico salía de screenshots. Añadir logging por fase fue lo que
+  permitió encontrar las otras dos causas **el mismo día**. Cuidado con el
+  handler: `uvicorn`/`fastmcp` reconfiguran el root logger y sin handler propio
+  no sale nada a `docker logs` — el logging "está puesto" y no se ve.
+- **Un `done` que no produjo nada no es un resultado: es un fallo silencioso.**
+  Si el guarda anti-duplicado lo trata como terminal, bloquea el reintento
+  mientras la tarea todavía era recuperable. Distinguir *terminó* de *terminó
+  habiendo producido algo*.
+- **Los defaults de espera de un bot deben modelar el comportamiento humano.**
+  Salir a los 3 minutos de estar sola es razonable al final de una reunión y
+  absurdo al principio: **la gente se conecta tarde.** El mismo umbral aplicado a
+  los dos momentos hacía que el bot se fuera justo antes de que llegara el
+  primero — y desde fuera se ve idéntico a "el bot no entró". Umbral asimétrico
+  según la fase, no una constante.

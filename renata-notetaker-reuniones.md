@@ -171,21 +171,46 @@ afinar contra una reunión real (UI en español):
 Tool central: `attend_meeting(url, max_minutes)` → transcripción + archivo en
 `/data/transcripts/`. Tools de tuning: `capture_debug`, `test_captions`.
 
-### Seguro "salir si está sola"
+### Seguro "salir si está sola" — y la paciencia asimétrica
 
 `_attend_core` cuenta participantes por el atributo `data-participant-id` (set de
-ids únicos). Si queda ≤1 (solo Renata) durante 3 min seguidos, sale. Cubre salas
-vacías (el cron entra a cualquier evento del calendario, haya gente o no) y el
-cierre de la reunión. `ended_reason` queda en `meeting_ended` / `alone` /
-`max_minutes`.
+ids únicos). Si queda ≤1 (solo Renata) sale. Cubre salas vacías (el cron entra a
+cualquier evento del calendario, haya gente o no) y el cierre de la reunión.
+
+**⚠️ La espera NO es simétrica** (corregido 2026-08-10). Con 3 min fijos, Renata
+entraba clavada a la hora, no encontraba a nadie —**la gente se conecta 5 minutos
+tarde**— y se iba antes de que llegara el primero. Desde fuera se ve idéntico a
+"el bot no entró", que fue justamente el reporte que abrió esta investigación.
+
+| Momento | Espera | Por qué |
+|---|---|---|
+| Antes del primer humano | **12 min** (`_WAIT_FOR_HUMANS_MINUTES`) | la gente llega tarde |
+| Después de ver a alguien | **3 min** (`alone_minutes`) | la reunión terminó de verdad |
+
+El flag es `seen_other`, y se publica en el job. Además entra **2 min antes** de
+la hora oficial (`_JOIN_LEAD_SECONDS`), no clavada al minuto.
+
+`ended_reason`: `meeting_ended` / `alone` / `nadie_llegó` / `expulsada` /
+`max_minutes`. **`alone` y `nadie_llegó` significan cosas opuestas** — el primero
+es un cierre normal, el segundo es una reunión perdida.
 
 ### Botones de entrar
 
 Según el momento, Meet muestra distintos botones: **"Unirme ahora"** (reunión en
-vivo), **"Pedir unirte"** (sala de espera → alguien admite) o **"Unirte
-igualmente"** (fuera de hora / antes que el anfitrión / sala vacía). El regex de
-entrar contempla los tres; entrar a una sala vacía es seguro porque el
-alone-safeguard la saca en 3 min.
+vivo), **"Pedir unirte"** (sala de espera → alguien admite), **"Unirte
+igualmente"** (fuera de hora / antes que el anfitrión / sala vacía) o
+**"Cambiar aquí"** (⚠️ hay una sesión previa de Renata colgada en esa sala — ver
+*sesión fantasma* más abajo). El regex contempla los cuatro; entrar a una sala
+vacía es seguro porque el alone-safeguard la saca.
+
+### Nada de clicks a ciegas: el bot no pulsa botones que no entiende
+
+Renata pulsa únicamente botones de **listas blancas** explícitas: entrar, salir,
+subtítulos, y cerrar diálogos por la opción inocua. Nunca "el primer botón que
+haya" ni el afirmativo de un modal desconocido. No es purismo: en la misma
+pantalla conviven **"Iniciar Read AI"** (compartiría el audio de un comité de
+AROCO con un tercero) y **"Salir de la llamada"**. Un click genérico de descarte
+podría pulsar cualquiera de los dos.
 
 ### ⚠️ Riesgo operacional #1: no reconstruir con asistencia activa
 
@@ -565,12 +590,109 @@ equivocado**. Un mecanismo de recuperación que no puede recuperarse.
 los traía activos (recuerda la preferencia entre reuniones), el click los
 **apagaba** — el "arreglo" ingenuo de clickear más veces habría empeorado la cosa.
 
-### Lo que quedó sin explicar
+### Lo que quedó sin explicar → RESUELTO el 2026-08-10
 
 En la reunión del 2026-08-06 el primer intento debió acertar (sala nueva = un
-solo match) y aun así `captions_ok` salió `false`. **No sabemos por qué falló ese
-primer click**, y una sala vacía no reproduce el fallo: ahí activa bien. Por eso
-el fix incluye volcar evidencia (abajo) en vez de seguir conjeturando.
+solo match) y aun así `captions_ok` salió `false`. No sabíamos por qué, y una
+sala vacía no reproducía el fallo.
+
+**La evidencia que el propio fix mandó volcar dio la respuesta cuatro días
+después.** El screenshot de `captions_debug` de la reunión perdida del 2026-08-10
+mostraba un modal a pantalla completa:
+
+> **Asegúrate de que todos están preparados**
+> Álvaro ha iniciado la recogida de contenido multimedia con **Read AI**.
+> Si se acepta este cuadro de diálogo, Meet compartirá el audio y el vídeo de la
+> reunión con Read AI. […]
+> \[Cancelar]  \[Iniciar Read AI]
+
+**Read AI es otro notetaker**, instalado por otra persona del equipo en las mismas
+salas. Su diálogo de consentimiento **tapa la barra de controles entera**. El
+grep sobre `page.html` lo confirmó: `"Activar subtítulos"` estaba en el DOM — el
+selector era correcto — pero el modal se comía el click. Ni el `force: True` de
+Playwright lo salva: el click se despacha, Meet lo ignora.
+
+Por eso una sala vacía nunca lo reproducía (sin Read AI no hay modal) y por eso
+empezó en agosto y no antes: **Read AI no estaba en junio ni julio.** Habíamos
+buscado el fallo dentro de nuestro código durante dos rondas; no estaba ahí.
+
+> 🔑 Cuando un selector correcto no funciona, la pregunta no es "¿es el selector
+> correcto?" sino **"¿hay algo encima?"**. Un screenshot lo contesta en 5
+> segundos; el DOM solo, no — el botón está presente y visible en el árbol.
+
+**Arreglo — `_dismiss_blocking_dialogs()`:**
+
+```python
+# Lista BLANCA a propósito: jamás pulsar el botón afirmativo de un modal que no
+# entendemos. "Iniciar Read AI" compartiría el audio de la reunión con un
+# tercero; "Salir" nos echaría de la llamada.
+_RE_MODAL_DISMISS = re.compile(
+    r"^\s*(cancelar|cancel|cerrar|close|ahora no|not now|descartar|dismiss|"
+    r"entendido|got it|no,? gracias|no,? thanks|más tarde|later)\s*$", re.I)
+```
+
+Busca `[role=dialog] / [role=alertdialog] / [aria-modal=true]` visible, pulsa el
+botón inocuo, y si no hay ninguno prueba `Escape` y **lo deja registrado** (mejor
+grabar a medias que pulsar un botón desconocido). Corre en cuatro momentos:
+en la pantalla de pre-entrada, al entrar, **cada 30 s durante la reunión** (Read
+AI arranca cuando su dueño quiere, no al principio) y antes de colgar.
+
+Deja el texto del modal en el log — así el próximo diálogo que Google o un
+tercero inventen se identifica en la primera pasada y no en la tercera.
+
+### La tercera falla: sesión fantasma ("Cambiar aquí") — 2026-08-10
+
+Descubierta probando el fix anterior, y **reescribe el diagnóstico de todos los
+`"no se pudo entrar"` anteriores.**
+
+Al repetir `capture_debug` contra la misma sala, la entrada falló con
+`state: "no_join_button"`. El screenshot mostró que Meet ya **no** ofrecía
+"Unirse ahora" sino un botón azul **"Cambiar aquí"** (*transferir la llamada a
+este dispositivo*): Google seguía creyendo que Renata estaba dentro, porque la
+sesión anterior no había salido limpia — el modal de Read AI le había tapado
+también el botón de colgar.
+
+**Es un círculo vicioso que se retroalimenta:**
+
+```
+salida sucia → sesión fantasma en la sala
+             → Meet ofrece "Cambiar aquí" en vez de "Unirse ahora"
+             → _RE_JOIN no matchea → "no se pudo entrar"
+             → ese intento tampoco sale limpio → vuelta a empezar
+```
+
+Encaja con el bloque de **decenas de `no se pudo entrar` consecutivos entre el 28
+de julio y el 4 de agosto de 2026**, que en su momento atribuimos a sesión de
+Google caducada. La sesión estaba viva; era un fantasma atascado.
+
+**Arreglo por los dos lados** (uno solo no basta):
+
+```python
+# 1. Entrar aunque haya fantasma
+_RE_JOIN = re.compile(r"(unir\w*\s+ahora|unirte igualmente|volver a unir|"
+                      r"participar ahora|join now|join anyway|rejoin|"
+                      r"cambiar aqu[íi]|switch here)", re.I)
+
+# 2. No generarlo: _leave() despeja modales, reintenta y VERIFICA
+async def _leave(page, tag) -> bool:
+    await _dismiss_blocking_dialogs(page, tag)
+    salido = await _click_by_text(page, _RE_LEAVE, timeout=5000)
+    await page.wait_for_timeout(2000)
+    if await _in_call(page):          # segundo intento
+        ...
+    if await _in_call(page):
+        log.error("%s | NO se pudo salir: queda sesión fantasma", tag)
+        await _snapshot(page, tag, "fantasma")
+        return False
+```
+
+`_leave()` sustituye a los tres `_click_by_text(page, _RE_LEAVE)` sueltos que
+había en `_attend_core`, `capture_debug` y `test_captions`.
+
+> 🔑 **Colgar mal no falla: falla la reunión de mañana.** Un `finally` que
+> intenta salir y no comprueba nada parece correcto en la revisión de código y
+> deja deuda invisible en un servidor remoto. Toda salida de un recurso
+> compartido debe verificarse, no solo intentarse.
 
 ### Arreglo (2026-08-06) — los tres cambios van juntos
 
@@ -713,12 +835,104 @@ hits = [lab for tag in botones if RX.search(lab)]   # el bot clickea hits[0]
   conclusiones finales — no sabe cómo acabó la reunión. Con `alone` /
   `meeting_ended` no pone nada. Sin esto, unas notas truncadas se leen igual que
   unas completas: **el lector no tiene forma de saber que falta el final.**
+- **Reintento cuando la reunión quedó en 0 líneas** (2026-08-10). El
+  anti-duplicado solo reintentaba `status:"error"`, así que un `done` con
+  `lines:0` **bloqueaba la sala el resto del día**: el 2026-08-10 el cron de las
+  09:15 volvió a ver el Comité Operativo (seguía en curso, el calendario lo
+  devolvía) y respondió `skipped` — se perdió la reunión entera pudiendo haber
+  entrado. Ahora `_is_retryable()` también acepta `done` sin líneas, con tope de
+  3 intentos/día (`_MAX_ATTEMPTS_PER_MEETING`), y los intentos fallidos se marcan
+  `sent` + `superseded_by_retry` para no mandar tres avisos de la misma reunión.
+  **Un `done` que no produjo nada no es un resultado: es un fallo silencioso.**
+- **Reentrada automática si Meet la expulsa** (2026-08-10). `joined:true` se
+  comprobaba una vez y nunca más; el 2026-08-10 el job reportó entrada y 90 s
+  después el navegador estaba en la portada de Meet "grabando" nada. El chequeo
+  que debía detectarlo buscaba `"/landing" in page.url`, **pero la portada real
+  es `https://meet.google.com/`** — la condición no se cumplía nunca. Ahora
+  `_in_call()` mira el botón de colgar (la señal fiable), se confirma con dos
+  lecturas separadas 3 s (una negativa fugaz no debe provocar una reentrada que
+  sí nos sacaría) y reentra hasta 3 veces reactivando subtítulos.
+- **Logging del bot** (2026-08-10). `meet_bot.py` no emitía **ni una línea**: el
+  diagnóstico de una reunión perdida salía de un screenshot. Ahora hay un logger
+  con handler propio — `uvicorn`/`fastmcp` reconfiguran el root y sin handler
+  explícito no sale nada a `docker logs` — que registra cada fase. Es el cambio
+  que hizo posible encontrar las otras dos causas el mismo día.
+- **`tzdata` en la imagen** (2026-08-10). `TZ=America/Bogota` estaba en el
+  compose pero la imagen base no traía `tzdata`, así que se **ignoraba en
+  silencio**: los jobs guardaban UTC etiquetado como "America" y todo el
+  historial se leía con 5 h de desfase. Ojo al instalarlo: `tzdata` abre un
+  prompt interactivo de zona geográfica y **cuelga el build para siempre** —
+  obligatorio `DEBIAN_FRONTEND=noninteractive` (nos costó 50 min).
 - **`start_at` en `list_jobs`.** El primer aviso real de reunión vacía salió con
   la hora `2026-08-06T21:45:56` para una reunión de las 17:00: el skill pide la
   hora de inicio, `list_jobs` no la exponía y el modelo cayó en `created`, que es
   UTC y marca cuándo se creó el job, no cuándo era la reunión. **Un campo que el
   skill necesita y el tool no expone no da error: da un dato plausible y
   equivocado.**
+
+## Árbol de diagnóstico — los tres modos de falla
+
+Actualizado 2026-08-10. **Los tres se parecen desde fuera** ("Renata no tomó
+notas") y tienen causas y remedios distintos. Recorrer en este orden:
+
+```
+¿El job existe en ~/projects/data/renata-meet/jobs/?
+│
+├─ NO ───────────────────────► el cron no la detectó
+│                              · ¿reunión creada con <20 min de antelación?
+│                              · ¿fuera de la ventana 6-19h del cron?
+│                              · ver cron/output/5117c30930d8/ de esa hora
+│
+├─ status:"error", "no se pudo entrar"
+│   │
+│   └─► verify_session  ← SIEMPRE PRIMERO, es 1 comando
+│       ├─ logged_in:false ─► sesión Google caducada → re-sembrar (Mac, ~5 min)
+│       └─ logged_in:true  ─► NO re-sembrar, no arregla nada.
+│                            Es SESIÓN FANTASMA. Mirar debug/nojoin_*.png:
+│                            si se ve "Cambiar aquí", es eso. Expira sola.
+│
+└─ status:"done" pero lines:0  ← engaña: no hay error en ninguna parte
+    │
+    ├─ captions_ok:false ─► no se activaron los subtítulos
+    │                       Mirar debug/captions_fail_*.png:
+    │                       ¿hay un MODAL encima? (Read AI, avisos de Google)
+    │                       Si sí: mirar el log del modal en docker logs.
+    │
+    └─ captions_ok:true ──► subtítulos activos pero nadie habló, o Meet no
+                            generó captions. Comprobar ended_reason:
+                            "nadie_llegó" = entró y no apareció nadie.
+```
+
+**Comando único para el 90 % del diagnóstico** (desde el 2026-08-10 el bot deja
+rastro; antes esto no existía y todo salía de screenshots):
+
+```bash
+docker logs renata-meet-mcp 2>&1 | grep "\[meet\]"
+```
+
+Una asistencia sana se ve así de punta a punta:
+
+```
+goto https://meet.google.com/xxx-xxxx-xxx
+pre-join url=https://meet.google.com/xxx-xxxx-xxx
+modal cerrado con 'close': Micrófono no encontrado
+click entrar → joined, esperando estar dentro
+DENTRO (state=joined, url=https://meet.google.com/xxx-xxxx-xxx)
+subtítulos ok=True idioma=Español (México)
+llegó el primer participante (n=2)
+fin: motivo=alone líneas=352 subtítulos=True reentradas=0
+fuera de la llamada, sesión cerrada limpia
+```
+
+Cualquier línea que falte marca dónde se rompió.
+
+### Convivir con otro notetaker
+
+Read AI (u otro bot de terceros) en la misma sala **no impide** que Renata
+trabaje desde el fix, pero conviene saber que están los dos: graban lo mismo, y
+cada uno pide su propio consentimiento a los participantes. Es una decisión de
+equipo, no técnica. Google Meet ofrece además su propio "Usar Gemini para tomar
+notas" en la pantalla de pre-entrada — tres notetakers disponibles a la vez.
 
 ## Futuro ⏳
 
