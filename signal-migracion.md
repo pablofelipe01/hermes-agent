@@ -1,6 +1,8 @@
-# Migrar los agentes de Telegram a Signal
+# Migrar un agente de Telegram a Signal
 
-Estado: **Renata migrada y en producción** (2026-08-11). Hermes pendiente.
+Estado: **solo Renata** está en Signal (2026-08-11). **Hermes se queda en
+Telegram** por decisión de Pablo — no es una migración global ni un pendiente.
+Este documento es el runbook por si algún día se migra otro agente.
 
 ## Por qué
 
@@ -207,11 +209,67 @@ Comprobación de que el gateway lo soltó: el log dice `Gateway running with 1
 platform(s)` y `grep -i telegram` sobre `.env` y `cron/jobs.json` no devuelve nada
 (salvo comentarios).
 
+## Si algún día se migra otro agente
+
+**Hermes se queda en Telegram** (decisión de 2026-08-11). Lo que sigue solo aplica
+si se retoma para él o para un agente nuevo.
+
+### Cada agente necesita su propio número
+
+No se puede reutilizar el número de otro agente. Signal **no enruta por
+dispositivo**: cada mensaje entrante llega a *todos* los dispositivos vinculados
+de la cuenta, así que los dos agentes lo procesarían y **los dos contestarían**,
+con la misma identidad y el mismo nombre de perfil. Dejarían de ser dos
+interlocutores distintos.
+
+Ojo también: **la app de Signal solo admite una cuenta por instalación**, así que
+el teléfono de un agente no sirve para registrar el de otro. O segundo teléfono, o
+la vía de abajo.
+
+### Alternativa a vincular: registrar desde un portátil
+
+Si no se quiere un teléfono permanente por agente, se puede registrar con
+`signal-cli` **desde una máquina con IP residencial** (que sí pasa el filtro que
+bloquea al servidor), y mover el estado después:
+
+```bash
+brew install signal-cli
+signal-cli -a $NUM register --captcha 'signalcaptcha://…'   # captcha del MISMO navegador
+signal-cli -a $NUM verify 123456                            # SMS a la SIM
+tar czf agente-signal.tgz -C ~/.local/share/signal-cli data
+scp agente-signal.tgz servidor:/home/aroco/projects/data/<agente>-signal/
+```
+
+Así el servidor queda como dispositivo **principal** y no hace falta conservar
+ningún teléfono. Dos cuidados: el `.tgz` son **claves privadas en claro**, y hay
+que **borrar la copia del portátil** después — dos primarios vivos de la misma
+cuenta se desincronizan y uno acaba desregistrado.
+
+### Grupos: desactivados por defecto, y la variable está mal nombrada
+
+`SIGNAL_GROUP_ALLOWED_USERS` **lleva IDs de GRUPO, no de usuario**, pese al nombre.
+Vacío (el default) ⇒ el agente **ignora todos los mensajes de grupo**, lo que
+parece una avería sin serlo. `*` ⇒ todos los grupos.
+
+Para mandar los avisos automáticos a un grupo en vez de al hilo privado:
+
+| Variable | Valor |
+|---|---|
+| `SIGNAL_GROUP_ALLOWED_USERS` | `<groupId>` |
+| `SIGNAL_HOME_CHANNEL` | `group:<groupId>` |
+| `deliver` de crons | `signal:group:<groupId>` |
+
+El `chat_id` de grupo es `group:<groupId>` (`gateway/platforms/signal.py`), y el
+deliver de cron parte por el **primer** `:` (`cron/scheduler.py`), así que
+`signal:group:<id>` es un destino válido. El ID sale de `signal-cli … listGroups`,
+o se crea el grupo con `signal-cli … updateGroup -n "…" -m +57… -m +57…`, que lo
+devuelve directo.
+
+> Quien esté en ese grupo **puede darle órdenes al agente**, no solo leer los
+> avisos. Es una lista de mando, no de espectadores.
+
 ## Pendiente
 
-- **Hermes**, con **su propio número** — no compartir la cuenta entre agentes: los
-  mensajes de los dos llegarían al mismo hilo. Misma vía de vinculación; el
-  registro directo va a fallar con el mismo 403.
 - Rate limits: el adaptador trae `signal_rate_limit.py` con pacing por lotes, lo
   que sugiere que upstream chocó con límites al mandar muchos adjuntos. Los
   informes de Renata llevan PDFs; vigilar los primeros envíos.
