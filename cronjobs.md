@@ -97,7 +97,7 @@ El campo `deliver` controla a dónde llega la respuesta del agente:
   cuando se crea un job desde Telegram.
 - `local` — solo guarda el output en disco, no entrega a nadie.
 - `<plataforma>:<chat_id>` — fuerza una entrega específica.
-  Ej: `telegram:5130071932`.
+  Ej: `telegram:<TU_CHAT_ID>`.
 
 **Tip:** redirigir `deliver` a tu propio chat es la forma más rápida de
 testear un job sin spammear al destinatario real. Ver §6.
