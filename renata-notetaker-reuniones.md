@@ -468,14 +468,46 @@ Fase 2 (sembrar en la Mac y subir), repetido.
 |---|---|---|---|
 | ~2026-07-09 | 2026-07-14 | todas del 9 al 14-jul | Pablo lo notó → se creó el cron de chequeo |
 | 2026-07-27 | 2026-08-04 | ~11 (3 comités el 3-ago; "Revisión CRM y Plataformas" el 4-ago) | Pablo lo notó otra vez — el cron **sí** detectaba pero no avisaba (ver gotcha abajo) |
+| 2026-08-18, entre 12:50 y 15:15 | 2026-08-19 | 1 ("Revisión CRM y Plataformas" del 18-ago, 3 intentos `no_join_button`) | Pablo lo reportó a la mañana siguiente |
 
 Duración observada de la cookie: **2–3 semanas** sin asistencias que la renueven.
-Re-sembrada el 2026-08-04 a las 16:04 (`logged_in:true`, `meet.google.com/home`).
+Re-sembrada el 2026-08-04 a las 16:04 y el 2026-08-19 a las 08:58 (las dos veces
+`logged_in:true`, `meet.google.com/home`).
+
+La caducidad del 18-ago quedó acotada con precisión poco común porque hubo una
+asistencia buena y una fallida el mismo día: el Comité Financiero de las 11:30
+grabó 370 líneas y terminó `done` a las 12:50; la reunión de las 15:30 ya no
+entró. **El job que sí funcionó es tanto evidencia como el que falló** — al
+diagnosticar, ordenar `jobs/` por fecha y buscar dónde está la frontera.
+
+#### Fricciones del re-sembrado (vistas el 2026-08-19)
+
+El procedimiento funciona, pero costó tres intentos por detalles del entorno.
+Corregidas ya en `scripts/reseed_renata.py`, se listan porque cualquiera reaparece
+al copiar el comando a otra máquina:
+
+- **El placeholder del `scp`.** `aroco@<server>:` copiado literal hace que zsh lea
+  `<server>` como redirección y falle con "no such file or directory", antes de
+  intentar conectar siquiera. Sustituir el placeholder por la IP real.
+- **`OUT` relativo.** El archivo se guardaba en el cwd del intérprete; lanzando el
+  script por ruta absoluta desde otra carpeta, "no aparecía". Ahora es
+  `~/storage_state_renata.json` explícito.
+- **Cerrar la ventana del navegador tras el login** mata el script antes de que
+  guarde. El prompt lo advierte ahora: se pulsa Enter en la terminal.
+- **El Chromium de Playwright** a veces recibe "este navegador puede no ser
+  seguro" de Google; `channel="chrome"` (Chrome del sistema) lo evita.
+- **Verificar que el `scp` llegó de verdad**, con `ls -la` y `md5sum` contra el
+  backup, antes de dar por hecha la subida. Pasó que se dio por subido sin
+  haberse ejecutado y `verify_session` seguía en `false`; el diagnóstico se fue
+  detrás de la sesión cuando el problema era el fichero.
+- Hacer `cp` de backup del `storage_state.json` del servidor antes de
+  sobreescribirlo.
 
 ### Chequeo automático de sesión (cron `Notetaker chequeo sesion`) ✅
 
 Desplegado 2026-07-14 para no volver a enterarse por una reunión perdida. Corre
-`verify_session` y **avisa por Telegram SOLO si la sesión caducó**; si está sana,
+`verify_session` y **avisa SOLO si la sesión caducó** (por Signal desde la
+migración de 2026-08-11; antes Telegram); si está sana,
 calla. Horario: **`30 6,9,12,15 * * *`** (4 veces al día, ampliado 2026-08-04 —
 con un solo chequeo a las 6:30 una caducidad de media mañana costaba el día
 entero de reuniones).

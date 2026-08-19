@@ -1234,3 +1234,82 @@ correcto estaba en el DOM; el modal se comía el click. Reglas nuevas:
   los dos momentos hacía que el bot se fuera justo antes de que llegara el
   primero — y desde fuera se ve idéntico a "el bot no entró". Umbral asimétrico
   según la fase, no una constante.
+
+---
+
+## 10. Contenedores que lanzan navegador: `init: true` o acumulan zombies
+
+### Por qué
+
+En un contenedor sin init, el **PID 1 es el proceso de la app** (`python
+server.py`). PID 1 hereda a los huérfanos y es el único que puede cosecharlos,
+pero un servidor MCP no llama a `wait()` — no sabe que ese es su trabajo. Cada
+Chromium que termina deja una entrada `Z` en la tabla de procesos que **nadie
+retira mientras el contenedor viva**.
+
+No rompe nada el primer día: un zombie no consume CPU ni memoria, solo una
+entrada de PID. Por eso crece invisible durante semanas y el único aviso es una
+línea del MOTD al entrar por SSH.
+
+### Caso real (2026-08-19)
+
+187 zombies en el servidor. Repartidos entre exactamente los tres MCPs que usan
+navegador:
+
+| Contenedor        | Zombies | Uptime  |
+|-------------------|---------|---------|
+| `renata-meet-mcp` | 144     | 8 días  |
+| `barchart-mcp`    | 25      | 10 días |
+| `stonex-mcp`      | 18      | 10 días |
+
+Ningún otro MCP tenía uno solo. La correlación con "¿lanza Chromium?" fue
+perfecta — y es el diagnóstico, no una coincidencia.
+
+### Diagnóstico
+
+```bash
+# ¿cuántos y de quién cuelgan?
+ps -eo stat --no-headers | grep -c '^Z'
+ps -eo stat,ppid --no-headers | awk '$1 ~ /^Z/ {print $2}' | sort | uniq -c | sort -rn
+
+# mapear el PID padre a su contenedor
+cat /proc/<pid>/cgroup | grep -oE '[0-9a-f]{64}' | head -1
+docker ps --no-trunc --format '{{.ID}} {{.Names}}' | grep ^<hash>
+```
+
+### Cómo
+
+`init: true` en el servicio del `docker-compose.yml` — mete `docker-init` (tini)
+como PID 1, que sí cosecha:
+
+```yaml
+services:
+  mi-mcp:
+    build: .
+    container_name: mi-mcp
+    restart: unless-stopped
+    # tini como PID 1: cosecha los hijos del navegador.
+    init: true
+```
+
+Luego `docker compose up -d` (recrea; no hace falta rebuild) y verificar:
+
+```bash
+docker exec mi-mcp ps -p 1 -o comm=      # -> docker-init
+ps -eo stat --no-headers | grep -c '^Z'  # -> 0
+```
+
+### Notas
+
+- **Recrear es seguro si el estado vive en un bind mount**, que es la convención
+  de estos MCPs (`~/projects/data/<mcp>:/data`). Las sesiones de Google y de
+  Barchart sobrevivieron; se confirma con `verify_session` / `check_session`
+  *después* de recrear, no se asume — ver patrón #7.
+- ⚠️ **Pero no recrear un MCP que esté en mitad de un trabajo largo.** El bot de
+  Meet pierde la reunión y su transcripción. Antes: sin jobs `waiting`/`running`
+  y sin nada próximo en el calendario ni en `cron list`.
+- **Aplicarlo de entrada a todo MCP nuevo que use Playwright**, no cuando el
+  MOTD avise. El coste es una línea; el diagnóstico a posteriori es una tarde.
+- La regla general: **si tu contenedor hace `spawn` de procesos, tu PID 1 tiene
+  un trabajo que tu app no está haciendo.** Vale para navegadores, `ffmpeg`,
+  `pdftoppm` y cualquier herramienta externa invocada por subproceso.
