@@ -468,11 +468,16 @@ Fase 2 (sembrar en la Mac y subir), repetido.
 |---|---|---|---|
 | ~2026-07-09 | 2026-07-14 | todas del 9 al 14-jul | Pablo lo notó → se creó el cron de chequeo |
 | 2026-07-27 | 2026-08-04 | ~11 (3 comités el 3-ago; "Revisión CRM y Plataformas" el 4-ago) | Pablo lo notó otra vez — el cron **sí** detectaba pero no avisaba (ver gotcha abajo) |
-| 2026-08-18, entre 12:50 y 15:15 | 2026-08-19 | 1 ("Revisión CRM y Plataformas" del 18-ago, 3 intentos `no_join_button`) | Pablo lo reportó a la mañana siguiente |
+| 2026-08-18, entre 12:50 y 15:15 | 2026-08-19 | 1 ("Revisión CRM y Plataformas" del 18-ago, 3 intentos `no_join_button`) | ✅ **el cron de chequeo avisó por Signal** la mañana siguiente — primera caducidad detectada *y* notificada por el mecanismo |
 
 Duración observada de la cookie: **2–3 semanas** sin asistencias que la renueven.
 Re-sembrada el 2026-08-04 a las 16:04 y el 2026-08-19 a las 08:58 (las dos veces
 `logged_in:true`, `meet.google.com/home`).
+
+**El arreglo del 4-ago quedó validado en producción el 19-ago:** el aviso llegó
+por Signal a primera hora y el re-sembrado se hizo esa misma mañana. Coste: 1
+reunión, contra las ~11 de la caducidad anterior. La diferencia no fue detectar
+antes — el cron ya detectaba en julio — sino **que el aviso saliera**.
 
 La caducidad del 18-ago quedó acotada con precisión poco común porque hubo una
 asistencia buena y una fallida el mismo día: el Comité Financiero de las 11:30
