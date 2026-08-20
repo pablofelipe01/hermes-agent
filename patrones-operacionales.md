@@ -16,6 +16,7 @@ Patrones probados en producción que extienden lo cubierto en
 10. [Contenedores que lanzan navegador: `init: true` o acumulan zombies](#10-contenedores-que-lanzan-navegador-init-true-o-acumulan-zombies) — el PID 1 de tu app no cosecha huérfanos; 187 zombies invisibles.
 11. [Bypass de sandbox del navegador: la lógica corre y no sirve](#11-bypass-de-sandbox-del-navegador-la-lógica-corre-y-no-sirve) — AppArmor + variable de entorno equivocada; el toolset `browser` nativo está roto.
 12. [Un agente depurando toca producción — y no necesariamente la suya](#12-un-agente-depurando-toca-producción--y-no-necesariamente-la-suya) — `HERMES_HOME` separa datos, no privilegios.
+13. [Avisar por fuera del agente lo deja fuera de contexto](#13-avisar-por-fuera-del-agente-lo-deja-fuera-de-contexto) — el mensaje llega, pero el agente no sabe que lo mandó; `scripts/avisar_por_agente.sh`.
 
 Todos se basan en una sola instancia de Hermes corriendo nativa (no Docker —
 esa es la forma upstream del agente; los MCPs sí van en contenedores).
@@ -1501,3 +1502,65 @@ ls -t ~/.hermes-renata/sessions/*.jsonl | head -1   # transcript más reciente
 - La regla general: **el aislamiento por variable de entorno separa datos, no
   privilegios.** Sirve para que dos agentes no se pisen los archivos; no sirve
   para que uno no pueda tocar los del otro.
+
+---
+
+## 13. Avisar por fuera del agente lo deja fuera de contexto
+
+### Por qué
+
+Mandar un mensaje a un contacto sin pasar por el agente es fácil y tentador —
+para Signal es un POST al JSON-RPC de signal-cli:
+
+```bash
+curl -s -X POST http://127.0.0.1:8790/api/v1/rpc -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":"1","method":"send",
+       "params":{"recipient":["+57…"],"message":"…"}}'
+```
+
+Entrega perfecto y **no hay que parar el daemon** (el `signal-cli` de línea de
+comandos sí se pelea con él por el lock de la cuenta; la API HTTP no).
+
+El costo aparece después. El mensaje salió por fuera de la sesión del agente,
+así que **el agente no sabe que existió**. Cuando el contacto responda "listo,
+gracias" o "¿y para el mes pasado?", eso llega a una conversación donde nunca se
+dijo nada — y el agente contesta desde ese vacío.
+
+Es un fallo silencioso y a destiempo: el envío se ve exitoso, el problema se
+manifiesta horas después y en la cara del contacto, no en la terminal.
+
+### Cómo
+
+Que el turno lo dé el agente: resumir la sesión real de esa conversación y
+pedirle que mande él el mensaje con su tool `send_message`.
+
+```bash
+scripts/avisar_por_agente.sh ~/.hermes-renata signal +57XXXXXXXXX "El texto."
+```
+
+Lo que hace por dentro, si se quiere a mano:
+
+```bash
+export HERMES_HOME=~/.hermes-renata
+# El session_id NO es estable — se resuelve por clave de canal, no se hardcodea.
+SID=$(python3 -c "import json;print(json.load(open('$HERMES_HOME/sessions/sessions.json'))\
+['agent:main:signal:dm:+57XXXXXXXXX']['session_id'])")
+$HERMES_HOME/hermes-agent/venv/bin/python -m hermes_cli.main chat -Q -r "$SID" \
+  -t messaging -q "Mandá este mensaje tal cual con send_message a 'signal:+57XXXXXXXXX': …"
+```
+
+### Notas
+
+- **`-t messaging` no es opcional.** Sin el toolset explícito el agente no tiene
+  `send_message`, y en vez de fallar te dice que lo mandó. Mismo gotcha que
+  `enabled_toolsets` en [cronjobs.md](./cronjobs.md).
+- **Usarlo con la conversación quieta.** Si el gateway tiene ese agente cacheado
+  y el contacto escribe a la vez, hay dos escritores sobre la misma sesión y
+  gana el último. El desalojo por inactividad (~1h) se ve en `gateway.log` como
+  `Agent cache idle-TTL evict`.
+- `send_message` habla con el mismo daemon JSON-RPC, así que **no** necesita el
+  gateway corriendo ni para el daemon.
+- El envío a pelo sigue siendo lo correcto para lo que **no** es conversación:
+  alertas de cron, watchdogs, health checks. Ahí no hay contexto que preservar.
+- La regla general: **un canal de entrega no es un canal de conversación.** Si
+  esperás respuesta, el mensaje tiene que existir para quien la va a leer.
