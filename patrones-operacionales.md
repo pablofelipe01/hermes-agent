@@ -13,6 +13,9 @@ Patrones probados en producción que extienden lo cubierto en
 7. [MCPs que scrapean con sesión: que lleguen datos no prueba que la sesión viva](#7-mcps-que-scrapean-con-sesión-que-lleguen-datos-no-prueba-que-la-sesión-viva) — el health check que miente durante meses.
 8. [Entregables agendados sobre una sesión que caduca: avisar y degradar](#8-entregables-agendados-sobre-una-sesión-que-caduca-avisar-y-degradar-no-fallar-en-silencio) — skill de cara al usuario + cron watchdog + renovación humana del login.
 9. [Automatizar UI ajena: verificar el efecto, no el intento](#9-automatizar-ui-ajena-verificar-el-efecto-no-el-intento) — el click que "funciona" y no hace nada; instrumentar y avisar, no solo arreglar.
+10. [Contenedores que lanzan navegador: `init: true` o acumulan zombies](#10-contenedores-que-lanzan-navegador-init-true-o-acumulan-zombies) — el PID 1 de tu app no cosecha huérfanos; 187 zombies invisibles.
+11. [Bypass de sandbox del navegador: la lógica corre y no sirve](#11-bypass-de-sandbox-del-navegador-la-lógica-corre-y-no-sirve) — AppArmor + variable de entorno equivocada; el toolset `browser` nativo está roto.
+12. [Un agente depurando toca producción — y no necesariamente la suya](#12-un-agente-depurando-toca-producción--y-no-necesariamente-la-suya) — `HERMES_HOME` separa datos, no privilegios.
 
 Todos se basan en una sola instancia de Hermes corriendo nativa (no Docker —
 esa es la forma upstream del agente; los MCPs sí van en contenedores).
@@ -1313,3 +1316,188 @@ ps -eo stat --no-headers | grep -c '^Z'  # -> 0
 - La regla general: **si tu contenedor hace `spawn` de procesos, tu PID 1 tiene
   un trabajo que tu app no está haciendo.** Vale para navegadores, `ffmpeg`,
   `pdftoppm` y cualquier herramienta externa invocada por subproceso.
+
+---
+
+## 11. Bypass de sandbox del navegador: la lógica corre y no sirve
+
+### Por qué
+
+Ubuntu 23.10+ trae `kernel.apparmor_restrict_unprivileged_userns = 1`. Con eso
+Chromium no puede armar su sandbox y muere al arrancar, aunque no corras como
+root y aunque no estés en un contenedor:
+
+```
+FATAL:zygote_host_impl_linux.cc:128] No usable sandbox! If you are running on
+Ubuntu 23.10+ or another Linux distro that has disabled unprivileged user
+namespaces with AppArmor, see ...
+```
+
+Hermes **ya contempla esto**: `tools/browser_tool.py` (~línea 1805) detecta el
+caso — root, o `apparmor_restrict_unprivileged_userns == 1` — y exporta
+`--no-sandbox` al lanzar `agent-browser`. El problema es que lo exporta por la
+variable equivocada:
+
+| Variable | ¿La lee agent-browser 0.26? | Separador |
+|---|---|---|
+| `AGENT_BROWSER_CHROME_FLAGS` | **no** | — |
+| `AGENT_BROWSER_ARGS` | sí | **coma**, no espacio |
+
+Resultado: la detección acierta, el bypass "se aplica", y el navegador sigue
+sin arrancar. **El toolset `browser` nativo está roto en este servidor, en las
+tres instalaciones** (`~/.hermes`, `~/.hermes-jerry`, `~/.hermes-renata`).
+
+### La trampa
+
+Esta falla se presenta con la cara de "el navegador no anda en Docker", y a esa
+pregunta cualquiera —persona o agente— responde con seguridad "hay que pasarle
+`--no-sandbox`". Que es exactamente lo que el código ya hace. Se puede perder
+una tarde discutiendo la solución correcta mientras la solución correcta ya está
+escrita y no se está aplicando.
+
+Dos detalles que además despistan:
+
+- El diagnóstico "es por el contenedor" es **falso**: Hermes corre nativo. Es
+  AppArmor del host, y aplica igual fuera de Docker.
+- Los MCPs con Playwright propio (`renata-meet`, `barchart`, `stonex`) funcionan
+  normal — tienen su Chrome dentro del contenedor, con sus propios flags. Que
+  "el navegador de Renata sí sirve para Meet" no contradice nada.
+
+### Diagnóstico
+
+No leer el código y concluir: **probar la variable contra el binario real**.
+
+```bash
+# ¿AppArmor está restringiendo? (1 = sí)
+cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+
+# ¿Qué variable lee esta versión del CLI?
+~/.hermes/hermes-agent/node_modules/agent-browser/bin/agent-browser-linux-x64 \
+  --help | grep -iE 'AGENT_BROWSER_ARGS|CHROME_FLAGS|--args'
+
+# La que sirve arranca Chrome; la que no, repite el FATAL de arriba.
+AGENT_BROWSER_ARGS="--no-sandbox,--disable-dev-shm-usage" \
+  agent-browser --engine chrome --session t --json navigate '{"url":"https://example.com"}'
+```
+
+Un `"error":"CDP error (Page.navigate)..."` en esa última línea es **éxito**:
+Chrome arrancó, solo se quejó de la URL. El fallo real es el `No usable sandbox`.
+
+### Cómo (si se decide parchear)
+
+Es código upstream vendorizado, así que el parche es una deuda que se re-aplica
+en cada `hermes update`. Antes de tocarlo, considerar reportarlo upstream — el
+bug es de ellos, no de la instalación.
+
+Si se parchea, **en las tres instalaciones a la vez**, no en una:
+
+```bash
+for H in ~/.hermes ~/.hermes-jerry ~/.hermes-renata; do
+  sed -i 's/"AGENT_BROWSER_CHROME_FLAGS"/"AGENT_BROWSER_ARGS"/g;
+          s/"--no-sandbox --disable-dev-shm-usage"/"--no-sandbox,--disable-dev-shm-usage"/' \
+      "$H/hermes-agent/tools/browser_tool.py"
+done
+```
+
+Ojo con el separador: el valor pasa de espacios a **comas**. Cambiar solo el
+nombre de la variable deja el bug vivo con otra forma.
+
+El parche **no toma efecto hasta reiniciar el gateway** — el proceso ya importó
+el módulo. Y un agente no puede reiniciarse a sí mismo: *él es* el proceso del
+gateway. Tiene que hacerlo un humano (o el `reload` por SIGUSR1, que re-lee
+config pero no re-importa módulos, así que aquí no sirve).
+
+### Notas
+
+- **Estado en AROCO (2026-08-20): sin parchear, a propósito.** Se revirtió un
+  parche que había quedado aplicado en el runtime equivocado — ver patrón #12.
+- Alternativa sin tocar código, si algún día se quiere: bajar la restricción del
+  host (`sysctl kernel.apparmor_restrict_unprivileged_userns=0`). Es debilitar
+  una defensa de todo el servidor para un tool; no vale la pena mientras los
+  MCPs cubran los casos de scraping reales.
+- La regla general: **cuando la lógica correcta ya existe y el síntoma persiste,
+  el sospechoso es el contrato con la dependencia** (nombre de variable, formato
+  del valor, versión), no la lógica.
+
+---
+
+## 12. Un agente depurando toca producción — y no necesariamente la suya
+
+### Por qué
+
+El aislamiento entre Hermes en un mismo servidor es **solo `HERMES_HOME`** (ver
+patrón #1): config, sesiones y logs separados. Pero los tres procesos corren
+como el **mismo usuario Unix** (`aroco`, en `sudo` y `docker`, con sudo sin
+contraseña). El toolset `terminal` de cualquier agente alcanza el `$HOME` de los
+otros dos y puede escribirlo.
+
+Mientras el agente responde preguntas, esto no se nota. Se nota cuando le pedís
+que **arregle algo**: pasa de leer a editar, y no tiene forma estructural de
+saber cuál de los tres runtimes es el suyo.
+
+### Caso real (2026-08-20)
+
+Álvaro le pidió a Renata por Signal el precio del cacao a una hora puntual.
+Renata solo tenía cierres diarios, intentó sacarlo de Barchart con el navegador,
+chocó con el `No usable sandbox` del patrón #11 y pidió permiso para arreglarlo.
+Con un "Approve to execute" de por medio:
+
+1. Diagnosticó el bug **bien** — encontró que la variable correcta era
+   `AGENT_BROWSER_ARGS` y lo verificó contra el binario.
+2. Aplicó el parche a `~/.hermes/hermes-agent/tools/browser_tool.py` — el
+   runtime de **Hermes**, no el suyo, que es `~/.hermes-renata/`.
+3. Pidió `sudo systemctl restart hermes-gateway` — otra vez el servicio ajeno,
+   que no le habría servido de nada.
+
+Diagnóstico correcto, ejecución en el vecino. Y como el gateway de Hermes no se
+reinició, quedó un desfase silencioso: **código en disco ≠ código en memoria**,
+que es el peor estado en el que dejar producción.
+
+### Diagnóstico
+
+Que un agente reporte "ya lo arreglé" no dice *dónde*. Las instalaciones hermanas
+sirven de **copia prístina de referencia** — con tres, dos siempre están limpias:
+
+```bash
+# ¿qué runtimes difieren del resto?
+for H in ~/.hermes ~/.hermes-jerry ~/.hermes-renata; do
+  echo -n "$H: "; ls -l "$H/hermes-agent/tools/browser_tool.py" | awk '{print $5, $6, $7, $8}'
+done
+
+# diff contra una hermana intacta; vacío = limpio
+diff ~/.hermes-renata/hermes-agent/tools/browser_tool.py \
+     ~/.hermes/hermes-agent/tools/browser_tool.py
+```
+
+El **tamaño y la fecha** delatan el archivo tocado antes de leer una línea. Para
+reconstruir qué pasó, el transcript de la sesión tiene las llamadas a `patch` y
+`terminal` con sus argumentos:
+
+```bash
+ls -t ~/.hermes-renata/sessions/*.jsonl | head -1   # transcript más reciente
+# roles: user / assistant (con tool_calls) / tool (con el resultado)
+```
+
+### Cómo
+
+- **Verificar la ruta, no la intención.** Antes de aceptar un fix de un agente,
+  `ls -l` del archivo que dice haber tocado + `diff` contra una hermana.
+- **Revertir es barato con una copia prístina al lado**; el `diff` vacío es la
+  prueba de que el revert quedó exacto, mejor que releer el parche.
+- **"Approve to execute" no es un cheque en blanco.** Autoriza el siguiente paso
+  concreto, no una sesión entera de edición en producción. Si el agente encadena
+  diagnóstico → parche → reinicio, cada eslabón merece su propia confirmación.
+- **Un agente no puede reiniciar su propio gateway** — es el proceso. Cualquier
+  fix suyo que necesite reinicio queda a medias por diseño. Tenerlo en cuenta al
+  evaluar si conviene que lo intente él.
+
+### Notas
+
+- Contención real, si algún día se quiere cerrar: **un usuario Unix por agente**,
+  o mover los Hermes nativos a contenedores como ya están los MCPs. Ninguna de
+  las dos está hecha — decisión pendiente, no hay ticket.
+- El `sudo` passwordless amplifica esto: no hay ni siquiera una contraseña como
+  punto de fricción antes de un `systemctl restart` del servicio de otro cliente.
+- La regla general: **el aislamiento por variable de entorno separa datos, no
+  privilegios.** Sirve para que dos agentes no se pisen los archivos; no sirve
+  para que uno no pueda tocar los del otro.
