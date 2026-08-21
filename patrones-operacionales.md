@@ -15,7 +15,7 @@ Patrones probados en producción que extienden lo cubierto en
 9. [Bypass de sandbox del navegador: la lógica corre y no sirve](#9-bypass-de-sandbox-del-navegador-la-lógica-corre-y-no-sirve) — AppArmor + variable de entorno equivocada; el toolset `browser` nativo está roto.
 10. [Un agente depurando toca producción — y no necesariamente la suya](#10-un-agente-depurando-toca-producción--y-no-necesariamente-la-suya) — `HERMES_HOME` separa datos, no privilegios.
 11. [Avisar por fuera del agente lo deja fuera de contexto](#11-avisar-por-fuera-del-agente-lo-deja-fuera-de-contexto) — el mensaje llega, pero el agente no sabe que lo mandó; `scripts/avisar_por_agente.sh`.
-12. [Sin saldo en el proveedor, un cron periódico se vuelve un spammer](#12-sin-saldo-en-el-proveedor-un-cron-periódico-se-vuelve-un-spammer) — el 402 se entrega como mensaje cada tick, y tumba al agente entero, no solo al job.
+12. [Sin saldo en el proveedor, un cron periódico se vuelve un spammer](#12-sin-saldo-en-el-proveedor-un-cron-periódico-se-vuelve-un-spammer) — el 402 se entrega como mensaje cada tick, tumba al agente entero y deja una marca en disco que dura una hora más que el problema.
 
 Todos se basan en una sola instancia de Hermes corriendo nativa (no Docker —
 esa es la forma upstream del agente; los MCPs sí van en contenedores).
@@ -1261,6 +1261,49 @@ Verificar saldo sin adivinar:
 ```bash
 curl -s -H "Authorization: Bearer $OPENROUTER_API_KEY" https://openrouter.ai/api/v1/key
 ```
+
+### La marca de agotamiento sobrevive al reinicio
+
+Recargar el saldo **no reactiva al agente del todo**. El pool de credenciales
+persiste el estado en `$HERMES_HOME/auth.json`, así que el `exhausted` sigue ahí
+después de un `systemctl restart`:
+
+```json
+"credential_pool": {"openrouter": [{"label": "OPENROUTER_API_KEY",
+  "last_status": "exhausted", "last_status_at": 1787344212.32,
+  "last_error_code": 402, ...}]}
+```
+
+El desbloqueo es por TTL desde `last_status_at`, según el status que lo causó
+(`agent/credential_pool.py`): **401 → 5 min, 429 → 1 h, cualquier otro → 1 h**.
+Un 402 cae en el caso general: **una hora de cooldown**, cuente o no con saldo.
+
+Lo confuso es que el agente **parece** recuperado: el camino principal usa la
+credencial configurada y responde normal. El que sigue bloqueado es el cliente
+auxiliar, que sí resuelve por pool:
+
+```
+WARNING agent.auxiliary_client: resolve_provider_client: openrouter requested but
+  OpenRouter credential pool has no usable entries (credentials may be exhausted)
+WARNING agent.auxiliary_client: Auxiliary auto-detect: no provider available.
+  Compression, summarization, and memory flush will not work.
+```
+
+Y eso apaga **compresión de contexto, resúmenes, flush de memoria y títulos**.
+La compresión es la que duele: sin proveedor auxiliar, una conversación larga
+descarta los turnos del medio **sin resumirlos**. El agente contesta con
+normalidad y simplemente olvida cosas a mitad de charla, sin marca visible.
+
+Limpiarlo a mano en vez de esperar la hora:
+
+```bash
+… auth reset openrouter          # "Reset status on 1 openrouter credentials"
+python3 -c "import json;print([e['last_status'] for e in
+  json.load(open('$HERMES_HOME/auth.json'))['credential_pool']['openrouter']])"
+```
+
+Conviene hacerlo aunque el TTL esté por vencer: si no, queda un `exhausted`
+viejo en disco esperando a confundir el próximo arranque.
 
 ### Notas
 
