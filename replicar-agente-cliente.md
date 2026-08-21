@@ -1,8 +1,8 @@
 # Replicar un agente-cliente en el mismo servidor
 
 Cómo levantar un **segundo (o tercer, cuarto…) agente Hermes** en un servidor que
-ya tiene Hermes corriendo, aislado del resto. Es el patrón usado para **Jerry** y
-**Renata** sobre la instalación base de AROCO: cada cliente es un Hermes nativo
+ya tiene Hermes corriendo, aislado del resto. Es el patrón usado para **Renata**
+sobre la instalación base de AROCO: cada cliente es un Hermes nativo
 independiente que **no comparte** config, sesiones, memoria ni estado con los demás.
 
 > Si vas a desplegar Hermes desde cero en un servidor limpio, usa
@@ -22,8 +22,7 @@ agente completamente distinto.
 
 ```
 ~/.hermes/            → agente base (AROCO)        HERMES_HOME=~/.hermes
-~/.hermes-jerry/      → agente cliente 2 (Jerry)   HERMES_HOME=~/.hermes-jerry
-~/.hermes-renata/     → agente cliente 3 (Renata)  HERMES_HOME=~/.hermes-renata
+~/.hermes-renata/     → agente cliente 2 (Renata)  HERMES_HOME=~/.hermes-renata
 ```
 
 Cada uno tiene su propio service systemd, su propio bot de Telegram, su propia
@@ -31,16 +30,16 @@ key de inferencia (facturación separada) y su propio bloque de puertos para MCP
 El único acoplamiento es que comparten el host y el usuario `aroco`.
 
 ```
-┌───────────────────────────── servidor (usuario aroco) ─────────────────────────────┐
+┌───────────────────────────── servidor (usuario aroco) ──────────────────────────────┐
 │                                                                                     │
-│  systemd: hermes-gateway          systemd: hermes-jerry-gateway   ...-renata-...    │
-│      │                                  │                              │            │
-│  HERMES_HOME=~/.hermes          ~/.hermes-jerry                ~/.hermes-renata      │
-│      │                                  │                              │            │
-│   config.yaml + .env + SOUL.md     (idem, propios)              (idem, propios)      │
-│      │                                  │                              │            │
-│   MCPs 8765–8773                   MCPs 8776+                    MCPs 8780+          │
-│   (Docker, 127.0.0.1)              (Docker, 127.0.0.1)           (Docker)            │
+│  systemd: hermes-gateway                    systemd: hermes-renata-gateway          │
+│      │                                            │                                 │
+│  HERMES_HOME=~/.hermes                      HERMES_HOME=~/.hermes-renata            │
+│      │                                            │                                 │
+│  config.yaml + .env + SOUL.md               (idem, propios)                         │
+│      │                                            │                                 │
+│  MCPs 8765–8773  (Docker, 127.0.0.1)        MCPs 8780–8785  (Docker)                │
+│                                                                                     │
 └─────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -80,8 +79,7 @@ Antes de empezar, ten listo (ver detalle en [`instrucciones.md` §0](./instrucci
 | Agente  | Bloque de puertos MCP |
 |---------|-----------------------|
 | AROCO   | 8765–8773             |
-| Jerry   | 8776+                 |
-| Renata  | 8780–8781             |
+| Renata  | 8780–8785             |
 | *nuevo* | siguiente bloque libre (ej. 8790+) |
 
 Asigna un bloque **nuevo y disjunto** a cada cliente para que nunca colisionen.

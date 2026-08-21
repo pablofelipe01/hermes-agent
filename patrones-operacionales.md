@@ -5,18 +5,17 @@ Patrones probados en producción que extienden lo cubierto en
 [instrucciones.md](./instrucciones.md):
 
 1. [Múltiples Hermes en el mismo servidor](#1-múltiples-hermes-en-el-mismo-servidor) — aislamiento vía `HERMES_HOME`.
-2. [Loop de trading autónomo](#2-loop-de-trading-autónomo) — cron + skill + helper script.
-3. [Migración Binance Algo Order (-4120)](#3-migración-binance-algo-order--4120) — workaround para `STOP_MARKET` / `TAKE_PROFIT_MARKET` desde 2025-12-09.
-4. [Anti-alucinación en tareas de consolidación temporal](#4-anti-alucinación-en-tareas-de-consolidación-temporal) — skill disciplinado con fuente única, no conversación libre.
-5. [MCPs que producen archivos: registrar un resource](#5-mcps-que-producen-archivos-registrar-un-resource) — fix del `Unknown resource` cuando un tool devuelve una ruta de archivo.
-6. [MCPs solapados: deshabilitar uno para evitar confusión del modelo](#6-mcps-solapados-deshabilitar-uno-para-evitar-confusión-del-modelo) — dos stacks que cubren la misma función (email/calendario Fastmail vs Google).
-7. [MCPs que scrapean con sesión: que lleguen datos no prueba que la sesión viva](#7-mcps-que-scrapean-con-sesión-que-lleguen-datos-no-prueba-que-la-sesión-viva) — el health check que miente durante meses.
-8. [Entregables agendados sobre una sesión que caduca: avisar y degradar](#8-entregables-agendados-sobre-una-sesión-que-caduca-avisar-y-degradar-no-fallar-en-silencio) — skill de cara al usuario + cron watchdog + renovación humana del login.
-9. [Automatizar UI ajena: verificar el efecto, no el intento](#9-automatizar-ui-ajena-verificar-el-efecto-no-el-intento) — el click que "funciona" y no hace nada; instrumentar y avisar, no solo arreglar.
-10. [Contenedores que lanzan navegador: `init: true` o acumulan zombies](#10-contenedores-que-lanzan-navegador-init-true-o-acumulan-zombies) — el PID 1 de tu app no cosecha huérfanos; 187 zombies invisibles.
-11. [Bypass de sandbox del navegador: la lógica corre y no sirve](#11-bypass-de-sandbox-del-navegador-la-lógica-corre-y-no-sirve) — AppArmor + variable de entorno equivocada; el toolset `browser` nativo está roto.
-12. [Un agente depurando toca producción — y no necesariamente la suya](#12-un-agente-depurando-toca-producción--y-no-necesariamente-la-suya) — `HERMES_HOME` separa datos, no privilegios.
-13. [Avisar por fuera del agente lo deja fuera de contexto](#13-avisar-por-fuera-del-agente-lo-deja-fuera-de-contexto) — el mensaje llega, pero el agente no sabe que lo mandó; `scripts/avisar_por_agente.sh`.
+2. [Anti-alucinación en tareas de consolidación temporal](#2-anti-alucinación-en-tareas-de-consolidación-temporal) — skill disciplinado con fuente única, no conversación libre.
+3. [MCPs que producen archivos: registrar un resource](#3-mcps-que-producen-archivos-registrar-un-resource) — fix del `Unknown resource` cuando un tool devuelve una ruta de archivo.
+4. [MCPs solapados: deshabilitar uno para evitar confusión del modelo](#4-mcps-solapados-deshabilitar-uno-para-evitar-confusión-del-modelo) — dos stacks que cubren la misma función (email/calendario Fastmail vs Google).
+5. [MCPs que scrapean con sesión: que lleguen datos no prueba que la sesión viva](#5-mcps-que-scrapean-con-sesión-que-lleguen-datos-no-prueba-que-la-sesión-viva) — el health check que miente durante meses.
+6. [Entregables agendados sobre una sesión que caduca: avisar y degradar](#6-entregables-agendados-sobre-una-sesión-que-caduca-avisar-y-degradar-no-fallar-en-silencio) — skill de cara al usuario + cron watchdog + renovación humana del login.
+7. [Automatizar UI ajena: verificar el efecto, no el intento](#7-automatizar-ui-ajena-verificar-el-efecto-no-el-intento) — el click que "funciona" y no hace nada; instrumentar y avisar, no solo arreglar.
+8. [Contenedores que lanzan navegador: `init: true` o acumulan zombies](#8-contenedores-que-lanzan-navegador-init-true-o-acumulan-zombies) — el PID 1 de tu app no cosecha huérfanos; 187 zombies invisibles.
+9. [Bypass de sandbox del navegador: la lógica corre y no sirve](#9-bypass-de-sandbox-del-navegador-la-lógica-corre-y-no-sirve) — AppArmor + variable de entorno equivocada; el toolset `browser` nativo está roto.
+10. [Un agente depurando toca producción — y no necesariamente la suya](#10-un-agente-depurando-toca-producción--y-no-necesariamente-la-suya) — `HERMES_HOME` separa datos, no privilegios.
+11. [Avisar por fuera del agente lo deja fuera de contexto](#11-avisar-por-fuera-del-agente-lo-deja-fuera-de-contexto) — el mensaje llega, pero el agente no sabe que lo mandó; `scripts/avisar_por_agente.sh`.
+12. [Sin saldo en el proveedor, un cron periódico se vuelve un spammer](#12-sin-saldo-en-el-proveedor-un-cron-periódico-se-vuelve-un-spammer) — el 402 se entrega como mensaje cada tick, y tumba al agente entero, no solo al job.
 
 Todos se basan en una sola instancia de Hermes corriendo nativa (no Docker —
 esa es la forma upstream del agente; los MCPs sí van en contenedores).
@@ -157,374 +156,7 @@ Hermes están corriendo independientes.
 
 ---
 
-## 2. Loop de trading autónomo
-
-### Por qué
-
-Cuando se quiere que Hermes **opere activamente** un sistema externo (trading,
-monitoreo de precios, ejecución repetida de tareas con decisión) sin que el
-usuario tenga que pedírselo cada vez. Patrón: un cronjob de Hermes invoca cada
-N minutos una skill que es **autocontenida** y orquesta `ver → decidir →
-ejecutar → reportar`.
-
-A diferencia de un cronjob simple de notificaciones (`cronjobs.md`), aquí
-el tick **toma decisiones y ejecuta tools de escritura**.
-
-### Arquitectura
-
-```
-/start-loop  (skill user-facing)
-   │
-   ▼
-helper script  →  hermes cron create --skill loop-tick --deliver telegram:CHAT_ID
-                  fix enabled_toolsets en jobs.json
-                  systemctl restart hermes-gateway
-                  │
-                  ▼
-              cronjob "*/N * * * *"
-                  │
-                  ▼ cada N min
-        agente fresh ejecuta skill loop-tick:
-          1. snapshot del estado vía MCP
-          2. evaluar lo que existe
-          3. decidir si actuar
-          4. ejecutar tools de escritura (con guardrails server-side)
-          5. reportar a Telegram
-
-/stop-loop  (skill user-facing)
-   │
-   ▼
-hermes cron rm <job_id>
-   (no toca el estado externo — solo apaga el tick)
-```
-
-### Componentes
-
-#### 2.1 La skill `loop-tick` (no tiene slash command)
-
-Es la skill que el cron invoca. Tags incluyen `internal` para señalar que no
-se llama directo desde Telegram.
-
-```markdown
----
-name: loop-tick
-description: "Tick autónomo. Pensado para cronjob, NO mensaje directo. Sin slash command."
-tags: [autonomous, cron, loop, internal]
----
-
-# Tick autónomo
-
-Eres <agente> en modo loop. [Rol concreto.]
-
-## Ciclo del tick
-
-### Paso 1 — Snapshot
-- mcp_X_get_state
-- mcp_X_get_open_items
-- ...
-
-### Paso 2 — Evaluar lo que existe
-[Criterios concretos.]
-
-### Paso 3 — Decidir nuevo (opcional)
-[Solo si hay capacidad / sentido.]
-
-### Paso 4 — Ejecutar
-[Tools con guardrails. Reportar guardrail rejections, no insistir.]
-
-### Paso 5 — Reportar
-**Si hubo cambios**: reporte detallado.
-**Si solo monitoreaste**: una línea compacta.
-**Si hay algo crítico**: flag explícito al inicio (⚠️).
-
-## Constraints duros
-- [Lista de límites operativos verificables.]
-
-## Principios
-- Calidad > cantidad. 0 acciones es válido.
-- Cada tick independiente (sin memoria entre ticks).
-- Honestidad sobre razonamiento débil.
-
-## Anti-patrones
-- ❌ Llamar a otra skill cara desde aquí. Tu scan debe ser ligero.
-- ❌ Inventar tools que no existen.
-- ❌ Reportes largos cuando no hubo cambios.
-```
-
-#### 2.2 Helper script `<HERMES_HOME>/bin/loop-ctl.sh`
-
-Encapsula `start/stop/status/tick-now` aplicando el fix de `enabled_toolsets`
-descrito en [cronjobs.md](./cronjobs.md):
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-HERMES_HOME="/home/USER/.hermes-X"
-HERMES_BIN="${HERMES_HOME}/hermes-agent/venv/bin/python -m hermes_cli.main"
-JOBS_JSON="${HERMES_HOME}/cron/jobs.json"
-JOB_NAME="my-loop"
-LOOP_SKILL="loop-tick"
-SCHEDULE="*/5 * * * *"
-REQUIRED_TOOLSETS='["mcp-mytool", "web"]'
-DELIVER_TARGET="telegram:<TU_CHAT_ID>"
-
-run_hermes() { HERMES_HOME="${HERMES_HOME}" ${HERMES_BIN} "$@"; }
-
-find_job_id() {
-    python3 - <<PY
-import json
-try:
-    d = json.load(open("${JOBS_JSON}"))
-    for j in d.get("jobs", []):
-        if j.get("name") == "${JOB_NAME}":
-            print(j["id"]); break
-except FileNotFoundError: pass
-PY
-}
-
-fix_toolsets() {
-    python3 - <<PY
-import json
-p = "${JOBS_JSON}"
-d = json.load(open(p))
-for j in d.get("jobs", []):
-    if j.get("id") == "$1":
-        j["enabled_toolsets"] = ${REQUIRED_TOOLSETS}
-json.dump(d, open(p, "w"), indent=2)
-PY
-}
-
-case "${1:-status}" in
-    start)
-        [[ -n "$(find_job_id)" ]] && { echo "already running"; exit 0; }
-        run_hermes cron create "${SCHEDULE}" \
-            --skill "${LOOP_SKILL}" --name "${JOB_NAME}" \
-            --deliver "${DELIVER_TARGET}"
-        job_id="$(find_job_id)"
-        fix_toolsets "${job_id}"
-        sudo systemctl restart hermes-X-gateway
-        echo "✓ started job=${job_id}"
-        ;;
-    stop)
-        job_id="$(find_job_id)"
-        [[ -z "${job_id}" ]] && { echo "not running"; exit 0; }
-        run_hermes cron rm "${job_id}"
-        echo "✓ stopped"
-        ;;
-    status)
-        job_id="$(find_job_id)"
-        [[ -z "${job_id}" ]] && { echo "loop_active: false"; exit 0; }
-        echo "loop_active: true · job_id: ${job_id}"
-        # ... imprimir last_run, last_status, next_run_at, completed_runs
-        ;;
-    tick-now)
-        run_hermes cron run "$(find_job_id)"
-        ;;
-esac
-```
-
-#### 2.3 Skills user-facing `/start-loop`, `/stop-loop`, `/status-loop`
-
-Son skills *finas*: solo describen al modelo que ejecute el script
-correspondiente vía la tool de terminal. Ejemplo `/start-loop`:
-
-```markdown
----
-name: start-loop
-description: "Arranca el loop autónomo. Comando /start-loop."
-tags: [loop, control]
----
-
-## Workflow
-
-1. Avisa al usuario: "Arrancando loop, procedo..."
-2. Ejecuta vía terminal: `bash /home/USER/.hermes-X/bin/loop-ctl.sh start`
-3. Reporta el `job_id` resultante y el próximo tick estimado.
-4. Si el script falla, reporta el error literal — no insistas.
-```
-
-### Gotchas críticos
-
-- **`deliver: origin` falla si el cron se crea desde CLI** (no desde
-  conversación Telegram). Síntoma: `last_delivery_error: "no delivery target
-  resolved for deliver=origin"`. Fix: usar `--deliver telegram:<CHAT_ID>`
-  explícito en el script. Patrón de descubrimiento que está en
-  [cronjobs.md](./cronjobs.md).
-
-- **`enabled_toolsets` debe estar correcto** o el tick alucina las tool
-  calls. Ver [cronjobs.md § "Gotcha enabled_toolsets"](./cronjobs.md). El
-  script lo aplica explícitamente tras `cron create`.
-
-- **Cada tick es contexto nuevo**. No hay memoria entre ticks salvo lo que
-  el agente lee del estado externo. Esto es feature, no bug: evita drift de
-  decisiones a largo plazo.
-
-- **Spam de "no opero"**: con `*/5` y un mercado calmado, son ~12 mensajes/h.
-  Considerar `*/15` si molesta, o instruir explícitamente "no reportar si
-  no hubo cambios" + cambiar el delivery a un thread silenciable.
-
-- **Stop apaga el cron, no el mundo**. Si el agente abrió posiciones / hizo
-  cambios externos, **siguen vivos**. La skill `/stop-loop` debe dejar esto
-  claro en su confirmación al usuario.
-
-- **Guardrails server-side, no en el prompt**. El prompt los menciona, pero
-  los **valida el tool**. Si el modelo "olvida" un guardrail, la tool lo
-  rechaza con `{"error": ..., "guardrail": true}`. Diseñar así protege contra
-  drift del prompt y contra modelos futuros que reinterpreten las reglas.
-
----
-
-## 3. Migración Binance Algo Order (-4120)
-
-### Síntoma
-
-Desde el 2025-12-09, llamadas a `/fapi/v1/order` con tipos condicionales
-fallan con:
-
-```json
-{"code": -4120, "msg": "Order type not supported for this endpoint.
-                       Please use the Algo Order API endpoints instead."}
-```
-
-Aplica a TODOS los tipos con `stopPrice` / `callbackRate`:
-
-- `STOP`, `STOP_MARKET`
-- `TAKE_PROFIT`, `TAKE_PROFIT_MARKET`
-- `TRAILING_STOP_MARKET`
-
-**Importante**: `GET /fapi/v1/exchangeInfo` sigue listándolos en `orderTypes`
-del símbolo (la documentación está rezagada respecto al cambio). El rechazo
-es a nivel de endpoint, no de configuración del símbolo. Aplica a mainnet
-**y** testnet.
-
-### Fix — nuevos endpoints
-
-| Operación | Método | Path | Nota |
-|---|---|---|---|
-| Crear orden condicional | `POST` | `/fapi/v1/algoOrder` | `algoType=CONDITIONAL` requerido |
-| Listar abiertas | `GET` | `/fapi/v1/openAlgoOrders` | params: `symbol` opcional |
-| Cancelar una | `DELETE` | `/fapi/v1/algoOrder` | params: `symbol`, `algoId` |
-
-Diferencia clave en el payload:
-
-```diff
-- "stopPrice": "80562"
-+ "triggerPrice": "80562"
-+ "algoType": "CONDITIONAL"
-```
-
-Response trae **`algoId`** (no `orderId`). Son IDs distintos del bucket
-regular — guardar y cancelar separados.
-
-### Ejemplo SL para LONG (cerrar posición completa al gatillar)
-
-```bash
-POST /fapi/v1/algoOrder
-{
-  "algoType": "CONDITIONAL",
-  "symbol": "BTCUSDT",
-  "side": "SELL",
-  "type": "STOP_MARKET",
-  "triggerPrice": "80562",
-  "closePosition": "true",
-  "workingType": "MARK_PRICE",
-  "priceProtect": "true"
-}
-```
-
-Response (success):
-
-```json
-{
-  "algoId": 1000000075496921,
-  "algoType": "CONDITIONAL",
-  "orderType": "STOP_MARKET",
-  "algoStatus": "NEW",
-  "triggerPrice": "80562.00",
-  "closePosition": true,
-  "reduceOnly": true,
-  ...
-}
-```
-
-### Implementación Python sin SDK
-
-```python
-import time, hmac, hashlib
-from urllib.parse import urlencode
-import requests
-
-API_KEY = "..."
-SECRET = b"..."
-BASE = "https://testnet.binancefuture.com"  # o mainnet
-
-def signed_request(method, path, params):
-    params = {**params, "timestamp": int(time.time() * 1000)}
-    qs = urlencode(params)
-    sig = hmac.new(SECRET, qs.encode(), hashlib.sha256).hexdigest()
-    r = requests.request(
-        method,
-        f"{BASE}{path}?{qs}&signature={sig}",
-        headers={"X-MBX-APIKEY": API_KEY},
-        timeout=15,
-    )
-    r.raise_for_status()
-    return r.json()
-
-# Crear SL
-sl = signed_request("POST", "/fapi/v1/algoOrder", {
-    "algoType": "CONDITIONAL",
-    "symbol": "BTCUSDT",
-    "side": "SELL",
-    "type": "STOP_MARKET",
-    "triggerPrice": "80562",
-    "closePosition": "true",
-    "workingType": "MARK_PRICE",
-    "priceProtect": "true",
-})
-print("SL algoId:", sl["algoId"])
-
-# Listar todas las algo abiertas del símbolo
-opens = signed_request("GET", "/fapi/v1/openAlgoOrders",
-                       {"symbol": "BTCUSDT"})
-
-# Cancelar una
-signed_request("DELETE", "/fapi/v1/algoOrder",
-               {"symbol": "BTCUSDT", "algoId": sl["algoId"]})
-```
-
-### Limpieza al cerrar posiciones
-
-Las algo orders con `closePosition=true` **no siempre se auto-cancelan**
-cuando se cierra manualmente la posición. Tras un `close_position`, recorrer
-`GET /fapi/v1/openAlgoOrders` y cancelar las huérfanas — si no, quedan
-en el book listas para gatillarse contra una posición nueva del mismo símbolo.
-
-### Cancelación combinada (regulares + algo)
-
-Para cancelar TODO lo pendiente de un símbolo, hacer dos llamadas:
-
-```python
-# Regulares
-signed_request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": "BTCUSDT"})
-
-# Algo (una por una)
-for a in signed_request("GET", "/fapi/v1/openAlgoOrders",
-                        {"symbol": "BTCUSDT"}):
-    signed_request("DELETE", "/fapi/v1/algoOrder",
-                   {"symbol": "BTCUSDT", "algoId": a["algoId"]})
-```
-
-### Referencias
-
-- [Binance docs — New Algo Order](https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/New-Algo-Order)
-- [freqtrade #12610 — discusión de la migración y workarounds](https://github.com/freqtrade/freqtrade/issues/12610)
-- [Binance Futures error codes](https://developers.binance.com/docs/derivatives/usds-margined-futures/error-code)
-
----
-
-## 4. Anti-alucinación en tareas de consolidación temporal
+## 2. Anti-alucinación en tareas de consolidación temporal
 
 ### Por qué
 
@@ -697,7 +329,7 @@ que cruce más de 1 día de fuentes.
 
 ---
 
-## 5. MCPs que producen archivos: registrar un resource
+## 3. MCPs que producen archivos: registrar un resource
 
 ### Síntoma
 
@@ -834,7 +466,7 @@ Fix aplicado = resource template de arriba.
 
 ---
 
-## 6. MCPs solapados: deshabilitar uno para evitar confusión del modelo
+## 4. MCPs solapados: deshabilitar uno para evitar confusión del modelo
 
 ### Por qué
 
@@ -906,7 +538,7 @@ se desconectaron los dos MCPs de Fastmail para que Hermes opere sin ambigüedad.
 
 ---
 
-## 7. MCPs que scrapean con sesión: que lleguen datos no prueba que la sesión viva
+## 5. MCPs que scrapean con sesión: que lleguen datos no prueba que la sesión viva
 
 ### Por qué
 
@@ -1031,7 +663,7 @@ for c in ctx.cookies():
   comentario. Antes de confiar en uno, forzá el caso negativo (borrá las
   cookies) y comprobá que efectivamente diga `false`.
 
-## 8. Entregables agendados sobre una sesión que caduca: avisar y degradar, no fallar en silencio
+## 6. Entregables agendados sobre una sesión que caduca: avisar y degradar, no fallar en silencio
 
 ### Por qué
 
@@ -1123,7 +755,7 @@ reunión / la petición urgente.
 
 ---
 
-## 9. Automatizar UI ajena: verificar el efecto, no el intento
+## 7. Automatizar UI ajena: verificar el efecto, no el intento
 
 Descubierto en el notetaker de Renata (2026-08-06): durante ~6 semanas el bot
 entró a las reuniones y grabó **0 líneas en el 34% de los casos**, sin un solo
@@ -1241,7 +873,7 @@ correcto estaba en el DOM; el modal se comía el click. Reglas nuevas:
 
 ---
 
-## 10. Contenedores que lanzan navegador: `init: true` o acumulan zombies
+## 8. Contenedores que lanzan navegador: `init: true` o acumulan zombies
 
 ### Por qué
 
@@ -1320,7 +952,7 @@ ps -eo stat --no-headers | grep -c '^Z'  # -> 0
 
 ---
 
-## 11. Bypass de sandbox del navegador: la lógica corre y no sirve
+## 9. Bypass de sandbox del navegador: la lógica corre y no sirve
 
 ### Por qué
 
@@ -1345,8 +977,8 @@ variable equivocada:
 | `AGENT_BROWSER_ARGS` | sí | **coma**, no espacio |
 
 Resultado: la detección acierta, el bypass "se aplica", y el navegador sigue
-sin arrancar. **El toolset `browser` nativo está roto en este servidor, en las
-tres instalaciones** (`~/.hermes`, `~/.hermes-jerry`, `~/.hermes-renata`).
+sin arrancar. **El toolset `browser` nativo está roto en este servidor, en
+ambas instalaciones** (`~/.hermes`, `~/.hermes-renata`).
 
 ### La trampa
 
@@ -1390,10 +1022,10 @@ Es código upstream vendorizado, así que el parche es una deuda que se re-aplic
 en cada `hermes update`. Antes de tocarlo, considerar reportarlo upstream — el
 bug es de ellos, no de la instalación.
 
-Si se parchea, **en las tres instalaciones a la vez**, no en una:
+Si se parchea, **en todas las instalaciones a la vez**, no en una:
 
 ```bash
-for H in ~/.hermes ~/.hermes-jerry ~/.hermes-renata; do
+for H in ~/.hermes ~/.hermes-renata; do
   sed -i 's/"AGENT_BROWSER_CHROME_FLAGS"/"AGENT_BROWSER_ARGS"/g;
           s/"--no-sandbox --disable-dev-shm-usage"/"--no-sandbox,--disable-dev-shm-usage"/' \
       "$H/hermes-agent/tools/browser_tool.py"
@@ -1422,7 +1054,7 @@ config pero no re-importa módulos, así que aquí no sirve).
 
 ---
 
-## 12. Un agente depurando toca producción — y no necesariamente la suya
+## 10. Un agente depurando toca producción — y no necesariamente la suya
 
 ### Por qué
 
@@ -1457,11 +1089,12 @@ que es el peor estado en el que dejar producción.
 ### Diagnóstico
 
 Que un agente reporte "ya lo arreglé" no dice *dónde*. Las instalaciones hermanas
-sirven de **copia prístina de referencia** — con tres, dos siempre están limpias:
+sirven de **copia prístina de referencia** — la que no se tocó dice cómo debería
+verse la otra:
 
 ```bash
 # ¿qué runtimes difieren del resto?
-for H in ~/.hermes ~/.hermes-jerry ~/.hermes-renata; do
+for H in ~/.hermes ~/.hermes-renata; do
   echo -n "$H: "; ls -l "$H/hermes-agent/tools/browser_tool.py" | awk '{print $5, $6, $7, $8}'
 done
 
@@ -1505,7 +1138,7 @@ ls -t ~/.hermes-renata/sessions/*.jsonl | head -1   # transcript más reciente
 
 ---
 
-## 13. Avisar por fuera del agente lo deja fuera de contexto
+## 11. Avisar por fuera del agente lo deja fuera de contexto
 
 ### Por qué
 
@@ -1564,3 +1197,85 @@ $HERMES_HOME/hermes-agent/venv/bin/python -m hermes_cli.main chat -Q -r "$SID" \
   alertas de cron, watchdogs, health checks. Ahí no hay contexto que preservar.
 - La regla general: **un canal de entrega no es un canal de conversación.** Si
   esperás respuesta, el mensaje tiene que existir para quien la va a leer.
+
+---
+
+## 12. Sin saldo en el proveedor, un cron periódico se vuelve un spammer
+
+### Por qué
+
+Un cron que entrega a un canal real (`deliver: signal:+57…,signal:+57…`) reparte
+también sus **fallos**: cuando el job revienta, el scheduler manda el texto del
+error al mismo destinatario, con la misma cadencia del schedule. Si el fallo es
+de infraestructura no se arregla solo, así que cada tick es un mensaje idéntico.
+
+Incidente real (Renata, 2026-08-21): la key de OpenRouter se quedó sin crédito a
+las 13:00. El job `Notetaker resumen` (`*/15 6-19 * * *`, deliver a dos números
+de Signal) empezó a entregar esto cada 15 minutos a Pablo y a Álvaro:
+
+```
+HTTP 402: This request requires more credits, or fewer max_tokens.
+You requested up to 64000 tokens, but can only afford 62696.
+```
+
+Doce corridas fallidas antes de que alguien lo reportara. El destinatario ve un
+error crudo de API, no un aviso — y no hay nada que pueda hacer al respecto.
+
+Dos detalles del modo de fallo que valen más que el incidente:
+
+- **El 402 no es "cuota agotada", es "no alcanza para este pedido".** OpenRouter
+  compara el saldo contra el **`max_tokens` solicitado**, no contra lo que la
+  llamada va a consumir de verdad. Con 62.696 tokens de saldo y un techo de
+  64.000, toda petición se rechaza aunque la respuesta fuese a ocupar 300 tokens.
+  Un `max_tokens` ajustado al tamaño real de la tarea habría seguido corriendo.
+- **Cae todo el agente, no solo el cron.** El pool de credenciales marca la key
+  como agotada (`credential pool: marking OPENROUTER_API_KEY exhausted (status=402),
+  rotating` → `no available entries`). Con una sola key no hay rotación posible:
+  el agente tampoco contesta a los usuarios ni ejecuta sus otros jobs. En el
+  incidente eso significó que el notetaker **dejó de entrar a reuniones** — un
+  daño mucho peor que los mensajes, y que nadie notó porque ese job entrega
+  `local` y falla en silencio.
+
+### Cómo
+
+Diagnóstico, en orden:
+
+```bash
+export HERMES_HOME=~/.hermes-renata
+$HERMES_HOME/hermes-agent/venv/bin/python -m hermes_cli.main cron list   # last_status/last_error
+grep -c "HTTP 402" $HERMES_HOME/cron/output/<job_id>/*.md                 # desde cuándo
+grep "credential pool" $HERMES_HOME/logs/agent.log | tail                 # ¿rotó o se quedó sin keys?
+```
+
+Contención inmediata — **pausar, no borrar**:
+
+```bash
+… cron pause <job_id>      # reversible; `cron resume` lo devuelve tal cual
+```
+
+Recrear un job desde cero pierde `enabled_toolsets`, `deliver` y el histórico de
+`repeat.completed`. Pausar es siempre la jugada.
+
+Verificar saldo sin adivinar:
+
+```bash
+curl -s -H "Authorization: Bearer $OPENROUTER_API_KEY" https://openrouter.ai/api/v1/key
+```
+
+### Notas
+
+- **Un job de cara al usuario no debería entregar sus excepciones.** Si el canal
+  de `deliver` es una persona, el error crudo no le sirve; lo que sirve es un
+  aviso redactado. Lo estructural sería auto-pausar tras N fallos consecutivos y
+  mandar los errores a un canal de diagnóstico aparte.
+- **`max_tokens` alto no es gratis ni inocuo.** Además del gasto, es lo que
+  decide si una llamada entra o se rechaza cuando el saldo va bajo. Para crons
+  cortos, ajustarlo al tamaño real de la respuesta da margen antes del corte.
+- **Un watchdog de saldo vale lo que cuesta.** Una sola alerta al bajar de un
+  umbral llega antes que el primer 402, y en un canal donde el aviso tiene
+  sentido. Compárese con enterarse por doce copias de un stack trace.
+- Las keys de inferencia **no se comparten entre agentes** justamente para que la
+  facturación de uno no tumbe al otro
+  ([replicar-agente-cliente.md](./replicar-agente-cliente.md)) — el reverso es
+  que cada agente es un punto único de fallo por saldo. Sin key de respaldo en el
+  pool, no hay rotación que valga.

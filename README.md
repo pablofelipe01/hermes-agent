@@ -11,8 +11,8 @@ Playbook de despliegue del agente Hermes en producción AROCO.
   en producción (aislamiento entre agentes, MCPs con sesión, zombies de
   navegador, sandbox de Chromium…). Empezar por acá cuando algo falla raro.
 - [`replicar-agente-cliente.md`](./replicar-agente-cliente.md) — levantar un
-  segundo/tercer agente Hermes aislado en el mismo servidor (patrón Jerry /
-  Renata vía `HERMES_HOME`), sin tocar los demás.
+  segundo/tercer agente Hermes aislado en el mismo servidor (patrón Renata
+  vía `HERMES_HOME`), sin tocar los demás.
 - [`renata-notetaker-reuniones.md`](./renata-notetaker-reuniones.md) — flujo para
   que Renata asista a los Google Meet de AROCO, transcriba y resuma (gcalendar +
   meet bot + cron/skill). Fase 1 desplegada.
