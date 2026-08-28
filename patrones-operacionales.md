@@ -16,6 +16,8 @@ Patrones probados en producción que extienden lo cubierto en
 10. [Un agente depurando toca producción — y no necesariamente la suya](#10-un-agente-depurando-toca-producción--y-no-necesariamente-la-suya) — `HERMES_HOME` separa datos, no privilegios.
 11. [Avisar por fuera del agente lo deja fuera de contexto](#11-avisar-por-fuera-del-agente-lo-deja-fuera-de-contexto) — el mensaje llega, pero el agente no sabe que lo mandó; `scripts/avisar_por_agente.sh`.
 12. [Sin saldo en el proveedor, un cron periódico se vuelve un spammer](#12-sin-saldo-en-el-proveedor-un-cron-periódico-se-vuelve-un-spammer) — el 402 se entrega como mensaje cada tick, tumba al agente entero y deja una marca en disco que dura una hora más que el problema.
+13. [Una tool detrás de un túnel de Cloudflare tiene 100 segundos](#13-una-tool-detrás-de-un-túnel-de-cloudflare-tiene-100-segundos) — el scraper que tardaba 95,6 s y "funcionaba"; precalentar con cron + caché corta en vez de pelear con el timeout.
+14. [Dos agentes, una cuenta externa: compartir el MCP, no duplicarlo](#14-dos-agentes-una-cuenta-externa-compartir-el-mcp-no-duplicarlo) — una sesión en vez de dos, una copia del parser en vez de dos; y el precio: es todo o nada.
 
 Todos se basan en una sola instancia de Hermes corriendo nativa (no Docker —
 esa es la forma upstream del agente; los MCPs sí van en contenedores).
@@ -1322,3 +1324,177 @@ viejo en disco esperando a confundir el próximo arranque.
   ([replicar-agente-cliente.md](./replicar-agente-cliente.md)) — el reverso es
   que cada agente es un punto único de fallo por saldo. Sin key de respaldo en el
   pool, no hay rotación que valga.
+
+---
+
+## 13. Una tool detrás de un túnel de Cloudflare tiene 100 segundos
+
+### Por qué
+
+Exponer un MCP con `cloudflared` es cómodo: hostname con TLS, Cloudflare Access
+delante, la app externa solo necesita el Service Token. Lo que no aparece en
+ninguna parte de esa configuración es que **Cloudflare corta la respuesta del
+origin a los 100 segundos** y devuelve un `524`. Para tools normales (una query,
+un cálculo) es irrelevante. Para una tool que **abre un navegador y parsea un
+PDF**, es el límite real de diseño y hay que medirlo antes de prometer nada.
+
+### Incidente (2026-08-28)
+
+Un CRM externo iba a consumir semanalmente una tool que baja los reportes
+tabulares de un portal financiero: navega el feed con Playwright, hace scroll
+para alcanzar los reportes periódicos, abre el detalle de dos artículos, descarga
+sus PDFs embebidos y los parsea. Funcionaba en las pruebas locales.
+
+Medido contra el MCP real:
+
+| Corrida | Tiempo |
+|---------|--------|
+| En frío (incluye re-login Okta) | **95,6 s** |
+| En caliente (sesión viva) | 43,6 s |
+
+El techo son 100 s. **Margen: 4 segundos.**
+
+### Diagnóstico — por qué "en frío" era el caso normal, no el excepcional
+
+El token de la sesión vive **15 minutos**. La llamada del CRM es **semanal**.
+Entre una corrida y la siguiente pasan siete días, así que la sesión *siempre*
+está muerta cuando llega la petición: cada corrida real paga el re-login
+Playwright. La medición "en caliente" solo se da si acabas de correrla a mano —
+es decir, exactamente en las pruebas, y nunca en producción.
+
+Es el mismo sesgo del patrón 5: **probar en el estado equivocado**. Ahí era una
+sesión viva que ocultaba que el health check mentía; aquí es una sesión viva que
+oculta que la tool no cabe en el timeout.
+
+### Patrón — precalentar, no optimizar
+
+Pelear por bajar de 95 s a 60 s es frágil (el portal ajeno decide cuánto tarda).
+La solución es que la petición que cruza el túnel **no haga el trabajo**:
+
+1. **La tool cachea su resultado en disco** (`/data/<algo>/latest.json` + una
+   copia fechada, que además deja releer una corrida vieja sin volver a la
+   fuente).
+2. **Un parámetro `max_age_hours` con default sensato** sirve el caché si es
+   reciente. Clave: el default tiene que ser **más corto que la periodicidad del
+   dato**. Con dato semanal y default de 12 h, un caché de la semana pasada
+   **no** se sirve — vence, y la tool va a la fuente. Nunca se entrega dato viejo
+   en silencio.
+3. **Un cron del sistema precalienta** poco antes de la hora en que llega la
+   petición externa, llamando la tool con `max_age_hours=0`. Ese cron corre en
+   `localhost`, donde no hay Cloudflare y los 95 s no molestan.
+
+```bash
+# crontab -e  (el cron corre en la TZ del server)
+MAILTO=""
+# Precarga 20 min antes de que el consumidor externo llame.
+40 8 * * 1 /home/<user>/projects/agents/<mcp>/warm_<tool>.sh
+```
+
+El script solo llama la tool dentro del contenedor y deja rastro en un log. Ojo
+al escribirlo: lleva un heredoc de Python **dentro** de otro heredoc, así que los
+delimitadores tienen que ser distintos.
+
+Resultado medido: la llamada del consumidor externo pasó de **95,6 s (a 4 s del
+524)** a **0,02 s desde caché**, con dato traído esa misma mañana.
+
+### Gotchas
+
+- **Medí la corrida en frío, no la que acabás de correr.** Si la tool mantiene
+  sesión, borrá o dejá vencer el estado antes de cronometrar.
+- **El default del caché es una decisión de corrección, no de rendimiento.** Si
+  es más largo que la periodicidad del dato, servís dato viejo como si fuera
+  nuevo. Más corto: el peor caso es una corrida lenta, que es un fallo visible.
+- **Devolvé `cached` y `fetched_at` en la respuesta.** El consumidor tiene que
+  poder distinguir "esto lo trajo el precalentamiento de hace 20 minutos" de
+  "esto salió del portal recién".
+- El `connectTimeout` que se configura en el `config.yml` del túnel es el de
+  **conexión**, no el de respuesta. No sube el techo de 100 s.
+- Sin Access delante, el origin responde `406` en `/mcp`; **con** Access, una
+  petición sin token da `403` con cabeceras `cf-access-domain` y `cf-access-aud`.
+  Sirve para verificar de un vistazo en qué estado está el hostname.
+
+---
+
+## 14. Dos agentes, una cuenta externa: compartir el MCP, no duplicarlo
+
+### Por qué
+
+Cuando dos agentes en el mismo servidor necesitan el mismo servicio externo, el
+reflejo es darle a cada uno su MCP, con su volumen `/data` aislado — que es lo
+correcto para las **credenciales de inferencia** y para el estado propio de cada
+agente ([replicar-agente-cliente.md](./replicar-agente-cliente.md)). Pero si los
+dos MCPs se autentican contra **la misma cuenta del proveedor externo**, el
+aislamiento deja de proteger y empieza a costar:
+
+- **Dos sesiones sobre una cuenta se pisan.** Dos Chromium haciendo login con el
+  mismo usuario se sobrescriben las cookies; el segundo invalida al primero.
+- **Dos copias del scraper.** El día que el proveedor cambie el formato de su PDF
+  o el markup de su portal, hay que arreglarlo dos veces — y la segunda se
+  olvida.
+- **Dos sesiones que mantener vivas.** Caso real: de los dos MCPs que scrapeaban
+  el mismo portal, el de un agente tenía el `storage_state` reescrito ese mismo
+  día y el del otro llevaba **24 días** sin renovarse. Sesión zombi que nadie
+  miraba, esperando a fallar en el peor momento.
+
+### Patrón
+
+Un solo contenedor por **cuenta externa**, declarado en la config de cada agente
+que lo necesite, **sin el prefijo del agente** en el nombre — la convención avisa
+de que no es suyo:
+
+```yaml
+mcp_servers:
+  agenteB-drive:
+    url: http://localhost:8784/mcp     # propio del agente
+
+  # Compartido con el Hermes principal (sin prefijo, a propósito).
+  # Misma cuenta del proveedor: dos containers haciendo login contra ella
+  # es una sesión de más, y dos copias del scraper que mantener.
+  stonex:
+    url: http://localhost:8770/mcp
+```
+
+Tras editar la config: **`sudo systemctl restart hermes-<agente>-gateway`**, no
+`reload` (ver `comandos.md`: el SIGUSR1 sale con código 75 y cae en el backoff de
+la unit — 60 s la primera vez, y subiendo). Verificar el descubrimiento:
+
+```bash
+HERMES_HOME=/home/<user>/.hermes-<agente> \
+  /home/<user>/.hermes-<agente>/hermes-agent/venv/bin/python -m hermes_cli.main mcp list
+
+grep -a "MCP server 'stonex'" /home/<user>/.hermes-<agente>/logs/agent.log | tail -1
+```
+
+Las tools quedan como `mcp_<servidor>_<tool>` — o sea `mcp_stonex_get_cocoa_tables`,
+sin rastro de qué agente es. Hay que actualizar los skills que las llamaban por el
+nombre viejo: el skill no falla ruidosamente si el nombre ya no existe.
+
+### El precio: es todo o nada
+
+**La config no soporta allowlist de tools por servidor MCP.** Compartir el
+servidor le da al segundo agente **todas** sus tools. En el caso real, compartir
+el MCP del bróker para que un agente pudiera leer dos reportes de mercado le dio
+también `get_account_summary`, `get_positions` y `download_daily_statement` — o
+sea, la cuenta de corretaje entera.
+
+Vale la pena decirlo en voz alta antes de compartir, sobre todo si el segundo
+agente habla con gente de afuera (reuniones, mensajería). Las opciones reales
+son:
+
+| Opción | Cuesta |
+|--------|--------|
+| Compartir el MCP entero | El segundo agente ve tools que no necesita |
+| Un MCP aparte que exponga solo esa tool | Otro contenedor, otro puerto, otra sesión — vuelve el problema original |
+| Duplicar el código | Dos sesiones y dos copias que mantener |
+
+No hay opción limpia; hay que elegir a sabiendas. Y recordar que el aislamiento
+entre agentes es **de datos, no de privilegios**: todos corren como el mismo
+usuario del sistema (patrón 10), así que compartir un MCP no abre una puerta que
+estuviera realmente cerrada — solo la hace cómoda de cruzar.
+
+### Señal de que te toca este patrón
+
+Preguntate: **¿los dos MCPs se loguean con el mismo usuario del proveedor?** Si
+la respuesta es sí, ya tenés dos sesiones compitiendo, lo sepas o no. Si es no
+(cada agente tiene su propia cuenta), duplicar está bien y compartir sería el
+error.

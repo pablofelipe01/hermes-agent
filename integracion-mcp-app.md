@@ -131,6 +131,49 @@ gestiona y refresca solo. La cuenta del bróker se configura por env var
 | `list_intel_articles(market_id=16974, page_size=20, only_primary=False)` | `market_id` (16974=Cocoa) | lista de artículos (title, abstract, fecha, autor, url) |
 | `get_intel_article(article_id)` | UUID | contenido completo del artículo |
 | `get_latest_cocoa_intel(limit=3, only_primary=True)` | `limit` 1-5 | los N artículos de cacao más recientes **con** su contenido |
+| `get_cocoa_tables(max_scrolls=8, max_age_hours=12)` | ninguno obligatorio | los reportes **tabulares** (Differentials + Ratios) como matriz de celdas |
+
+#### `get_cocoa_tables` — diferenciales y ratios como tabla
+
+Es la tool pensada para que una app cargue los diferenciales sin leer PDFs.
+Devuelve:
+
+```jsonc
+{
+  "differentials": {                      // o null si no se encontró
+    "published_date": "2026-08-20",       // fecha REAL del reporte, ISO
+    "pdf_url": "https://intel-cdn.stonex.com/…/cocoa_diffs.pdf?verify=…",
+    "matrix": [                           // página 1, fila por fila
+      ["Ivory Coast", "13-Aug", "20-Aug", "Change", "GBP", "EUR", "USD"],
+      ["CIF N. Europe", "£ 380", "£ 450", "£ 70", "£ 4,786", "€ 5,587", "$ 6,521"]
+    ]
+  },
+  "ratios": { /* misma forma */ },
+  "missing": [],                          // títulos que el scroll no alcanzó
+  "fetched_at": "2026-08-28T16:40:37+00:00",
+  "cached": false
+}
+```
+
+Tres cosas que la app debe respetar:
+
+1. **La matriz va cruda, sin interpretar.** Los valores son texto tal como salen
+   del PDF: `+150`, `(75)` (paréntesis = negativo), `£ 5,798` con separador de
+   miles. Convertirlos en el MCP arriesga perder el signo; la app decide. Guardar
+   la matriz cruda **además** de lo ya interpretado permite releer una semana
+   pasada si el parseo resultó equivocado, sin esperar al reporte siguiente.
+2. **`missing` no es "todavía no salió".** Ver el recuadro en
+   `renata-informe-a-sheets.md`: si la edición de esta semana no está publicada,
+   la tool devuelve la anterior con su fecha real. Comparar `published_date`
+   contra la semana esperada.
+3. **Un reporte alcanzado cuyo PDF falla al parsear** vuelve con `matrix: []` y
+   una clave `error`. Eso **no** es `missing` — no tiene sentido reintentar la
+   semana siguiente, hay que mirar el server.
+
+El resultado se cachea en `/data/cocoa_tables/` (`latest.json` +
+`<published_date>.json`). `max_age_hours` (default 12) sirve ese caché sin
+navegar el portal; `max_age_hours=0` fuerza lectura fresca. Un caché de la semana
+pasada supera las 12 h y **no** se sirve: se vuelve a traer.
 
 ### Autenticación (gestionada por el server)
 

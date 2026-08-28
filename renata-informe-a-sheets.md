@@ -100,8 +100,9 @@ container `barchart-mcp` vía `docker cp`/`exec`).
 
 ## Rama B — StoneX (reportes de cacao)
 
-Hoja fija: `AROCO — Informes StoneX (Cacao)`. Fuente: MCP `renata-intel`. Hay
-**dos tipos** de reporte y se tratan distinto:
+Hoja fija: `AROCO — Informes StoneX (Cacao)`. Fuentes: MCP `stonex` (compartido,
+para los tabulares) y MCP `renata-intel` (para los narrativos). Hay **dos tipos**
+de reporte y se tratan distinto:
 
 ### Tabulares — Cocoa Ratios Report y Cocoa Differentials Report
 
@@ -109,12 +110,18 @@ Son **tablas** (ratios / diferenciales por producto y origen + precios
 GBP/EUR/USD), pero vienen dentro de un **PDF gráfico sin líneas de grilla**:
 `pdfplumber.extract_tables()` devuelve 0 tablas y `extract_text()` mezcla los
 glifos. La extracción confiable (validada celda-a-celda contra el PDF renderizado)
-la hace la tool **`get_cocoa_tables()`** del MCP, a **nivel de carácter**:
+la hace la tool **`get_cocoa_tables()`** a **nivel de carácter**:
 
 - Agrupa los `chars` en filas por su coordenada `top`; dentro de cada fila corta
   columnas por gap horizontal (une los glifos de un número, separa columnas).
-- Devuelve `{found, missing, reports: [{title, report_date, pdf_url, matrix}]}`,
-  con `matrix` = filas/columnas listas para Sheets.
+- Devuelve `{differentials, ratios, missing, fetched_at, cached}`, donde cada una
+  de las dos primeras es `{published_date, pdf_url, matrix}` o `null`. `matrix` =
+  filas/columnas listas para Sheets.
+
+> **Dónde vive esta tool (cambió el 2026-08-28).** Está en el **MCP `stonex`
+> compartido**, no en `renata-intel`: el skill llama
+> `mcp_stonex_get_cocoa_tables()`. Antes estaba duplicada en los dos MCPs. Ver
+> *MCP compartido entre agentes* en `patrones-operacionales.md`.
 - El skill vuelca cada `matrix` como **pestaña-tabla de verdad** + una fila con el
   link al PDF original (para verificación). **No reinterpreta los números**: los
   pasa tal como los dejó el parser.
@@ -122,6 +129,15 @@ la hace la tool **`get_cocoa_tables()`** del MCP, a **nivel de carácter**:
 Detalle non-obvio del parser: al separar etiquetas pegadas (ej. `23-JulChange` →
 `23-Jul`,`Change`) solo se corta si ambas partes quedan con ≥2 chars — si no,
 partiría incorrectamente tokens como `ExW` en `Ex`,`W`.
+
+> **`missing` NO significa "el reporte de esta semana no salió".** StoneX publica
+> los jueves. Si esta semana no publicó, la tool devuelve la **edición anterior
+> con su fecha real** en `published_date` — `missing` solo aparece si no hay
+> *ninguna* edición de ese título en la ventana que alcanzó el scroll (~5 semanas
+> con `max_scrolls=8`). Quien consuma la tool tiene que comparar `published_date`
+> contra la semana esperada; si no, va a presentar el reporte de la semana pasada
+> como si fuera el nuevo. Caso real: el 2026-08-28 la cadencia era 6 → 13 → 20 de
+> agosto y la edición del 27 no existía.
 
 > **Fix de sesión (crítico).** Cuando el token del `storage_state` (el que lee el
 > SPA) caduca, StoneX **no devuelve 401**: cae a modo anónimo y sirve un feed
