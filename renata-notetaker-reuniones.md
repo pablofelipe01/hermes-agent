@@ -472,8 +472,8 @@ Fase 2 (sembrar en la Mac y subir), repetido.
 | 2026-09-01/02, entre 15:15 y 08:45 | 2026-09-02 | 2 ("Revisión Precios" y "Seguimiento Rain Forest" del 2-sep) | ✅ el cron avisó cada mañana; se atendió el 4-sep — segunda caducidad detectada *y* notificada |
 
 Duración observada de la cookie: **2–3 semanas** sin asistencias que la renueven.
-Re-sembrada el 2026-08-04 a las 16:04 y el 2026-08-19 a las 08:58 (las dos veces
-`logged_in:true`, `meet.google.com/home`).
+Re-sembrada el 2026-08-04 a las 16:04, el 2026-08-19 a las 08:58 y el 2026-09-04
+a las 07:53 (las tres veces `logged_in:true`, `meet.google.com/home`).
 
 Con la caducidad del 2-sep el rango se estrecha por abajo: **14 días justos**
 desde la re-sembrada del 19-ago, casi calcados a los ~14 del tramo
