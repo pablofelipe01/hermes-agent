@@ -469,10 +469,17 @@ Fase 2 (sembrar en la Mac y subir), repetido.
 | ~2026-07-09 | 2026-07-14 | todas del 9 al 14-jul | Pablo lo notó → se creó el cron de chequeo |
 | 2026-07-27 | 2026-08-04 | ~11 (3 comités el 3-ago; "Revisión CRM y Plataformas" el 4-ago) | Pablo lo notó otra vez — el cron **sí** detectaba pero no avisaba (ver gotcha abajo) |
 | 2026-08-18, entre 12:50 y 15:15 | 2026-08-19 | 1 ("Revisión CRM y Plataformas" del 18-ago, 3 intentos `no_join_button`) | ✅ **el cron de chequeo avisó por Signal** la mañana siguiente — primera caducidad detectada *y* notificada por el mecanismo |
+| 2026-09-01/02, entre 15:15 y 08:45 | 2026-09-02 | 2 ("Revisión Precios" y "Seguimiento Rain Forest" del 2-sep) | ✅ el cron avisó cada mañana; se atendió el 4-sep — segunda caducidad detectada *y* notificada |
 
 Duración observada de la cookie: **2–3 semanas** sin asistencias que la renueven.
 Re-sembrada el 2026-08-04 a las 16:04 y el 2026-08-19 a las 08:58 (las dos veces
 `logged_in:true`, `meet.google.com/home`).
+
+Con la caducidad del 2-sep el rango se estrecha por abajo: **14 días justos**
+desde la re-sembrada del 19-ago, casi calcados a los ~14 del tramo
+4-ago → 18-ago. Dos intervalos seguidos de dos semanas sugieren que el techo
+real está más cerca de 2 semanas que de 3, y que conviene leer el aviso del cron
+como el mecanismo primario, no como red de seguridad.
 
 **El arreglo del 4-ago quedó validado en producción el 19-ago:** el aviso llegó
 por Signal a primera hora y el re-sembrado se hizo esa misma mañana. Coste: 1
@@ -484,6 +491,23 @@ asistencia buena y una fallida el mismo día: el Comité Financiero de las 11:30
 grabó 370 líneas y terminó `done` a las 12:50; la reunión de las 15:30 ya no
 entró. **El job que sí funcionó es tanto evidencia como el que falló** — al
 diagnosticar, ordenar `jobs/` por fecha y buscar dónde está la frontera.
+
+La del 2-sep quedó acotada igual de bien y por el mismo método: la "Revisión CRM
+y Plataformas" del 1-sep a las 15:15 grabó 397 líneas y salió limpia; el primer
+`no se pudo entrar` fue a las 08:45 del 2-sep. Caducó de noche, sin reuniones de
+por medio.
+
+**Firma visual de esta falla.** El screenshot `nojoin_*` de `/data/renata-meet/debug/`
+distingue los dos modos de un vistazo, sin releer logs:
+
+| Lo que muestra el screenshot | Falla |
+|---|---|
+| **"Demuestra que eres tú — Vuelve a iniciar sesión para continuar"**, con el avatar de `renata@aroco.co` | sesión caducada → re-sembrar |
+| Botón azul **"Cambiar aquí"** en la pantalla de pre-entrada | sesión fantasma → *no* re-sembrar (ver más abajo) |
+
+Los cinco `nojoin_*` del 2-sep pesaban exactamente lo mismo (27.367 bytes): misma
+pantalla en los cinco intentos, otra pista barata de que es un modo de falla
+estable y no algo intermitente.
 
 #### Fricciones del re-sembrado (vistas el 2026-08-19)
 
@@ -562,6 +586,46 @@ envió nada. Y revisar `last_delivery_error` en `cron/jobs.json`: `None` con
 
 > El mismo bug afectaba a `Barchart chequeo sesion` (`ad5af3d40798`); corregido
 > igual el 2026-08-04.
+
+#### ⚠️ El chequeo pisaba el `storage_state` — parcheado 2026-09-04
+
+`verify_session` terminaba re-guardando la sesión del navegador **sin condicionar
+a `logged_in`**:
+
+```python
+logged_in = (not redirected) and (email is not None or "meet.google.com" in final_url)
+try:
+    await ctx.storage_state(path=STORAGE_STATE)   # <— se ejecutaba también con la sesión muerta
+except Exception:
+    pass
+```
+
+Con la cookie caducada, cada corrida del cron sobreescribía
+`/data/storage_state.json` con el estado **deslogueado** — 4 veces al día. No fue
+la causa de ninguna caducidad (la cookie ya estaba muerta cuando esto ocurría),
+pero es la clase de detalle que convierte un diagnóstico en un callejón: el
+archivo de sesión con `mtime` de esta mañana invita a pensar que algo lo está
+refrescando.
+
+Arreglo — envolver en `if logged_in:` (`meet_bot.py`, ~línea 258). **Un chequeo
+no debe poder degradar aquello que chequea.** El otro `storage_state()` (~línea
+808, al final de una asistencia real) se deja como está: ahí la sesión está viva
+por definición, y ése es justamente el guardado que alarga la cookie.
+
+Verificación en producción, por comportamiento y no por lectura del código: con
+la sesión aún caducada, correr `verify_session` y comprobar que el archivo no se
+mueve.
+
+```bash
+md5sum /home/aroco/projects/data/renata-meet/storage_state.json   # antes
+# ... verify_session ...
+md5sum /home/aroco/projects/data/renata-meet/storage_state.json   # mismo hash y mismo mtime
+```
+
+⚠️ El código va **horneado en la imagen** (`build: .`, sin volumen de código), así
+que requiere `docker compose up -d --build`. Antes de reconstruir, el ritual del
+Riesgo operacional #1: `list_jobs` sin nada en `waiting/joining/in_call` y
+`docker exec renata-meet-mcp ps aux | grep -c chrome` en 0.
 
 ## Mantenimiento — transcripciones vacías (la OTRA falla)
 
@@ -924,6 +988,7 @@ notas") y tienen causas y remedios distintos. Recorrer en este orden:
 │   │
 │   └─► verify_session  ← SIEMPRE PRIMERO, es 1 comando
 │       ├─ logged_in:false ─► sesión Google caducada → re-sembrar (Mac, ~5 min)
+│       │                    debug/nojoin_*.png muestra "Demuestra que eres tú"
 │       └─ logged_in:true  ─► NO re-sembrar, no arregla nada.
 │                            Es SESIÓN FANTASMA. Mirar debug/nojoin_*.png:
 │                            si se ve "Cambiar aquí", es eso. Expira sola.
