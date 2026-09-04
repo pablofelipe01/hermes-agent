@@ -608,7 +608,9 @@ archivo de sesión con `mtime` de esta mañana invita a pensar que algo lo está
 refrescando.
 
 Arreglo — envolver en `if logged_in:` (`meet_bot.py`, ~línea 258). **Un chequeo
-no debe poder degradar aquello que chequea.** El otro `storage_state()` (~línea
+no debe poder degradar aquello que chequea** — el patrón general, con el caso
+gemelo de `barchart-mcp`, está en
+[patrones-operacionales.md § 16](./patrones-operacionales.md). El otro `storage_state()` (~línea
 808, al final de una asistencia real) se deja como está: ahí la sesión está viva
 por definición, y ése es justamente el guardado que alarga la cookie.
 

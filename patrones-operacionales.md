@@ -1498,3 +1498,166 @@ Preguntate: **¿los dos MCPs se loguean con el mismo usuario del proveedor?** Si
 la respuesta es sí, ya tenés dos sesiones compitiendo, lo sepas o no. Si es no
 (cada agente tiene su propia cuenta), duplicar está bien y compartir sería el
 error.
+
+---
+
+## 15. Una regla escrita no le gana a una herramienta a mano
+
+### Por qué
+
+Renata daba el precio spot del cacao desde Yahoo —15-20 min de rezago— cuando
+debía darlo desde Barchart. Álvaro se lo corrigió **todos los días durante
+semanas**. El skill `precios-cacao` tenía una sección en MAYÚSCULAS que decía
+"NUNCA uses Yahoo para tiempo real". Ella se disculpaba, reconocía la regla,
+citaba el skill de memoria… y al día siguiente volvía a Yahoo.
+
+No era desobediencia. Era coherencia con lo que tenía a mano:
+
+| Lo que el agente veía en su contexto | |
+|---|---|
+| `renata-cacao.get_cocoa_prices` | descripción: *"Soporta INTRADÍA: para '¿a cuánto estaba el martes a las 8:00 am?'"* |
+| tools de spot en `barchart` | **no existían** |
+| el camino "correcto" según el skill | `docker cp` de un script + `docker exec` |
+
+La única herramienta que se anunciaba capaz de hacer el trabajo era la
+equivocada —y su ejemplo era, textual, el caso de uso del usuario—. El camino
+correcto no era una herramienta: eran dos comandos de shell contra un contenedor.
+
+**La descripción de una tool viaja siempre en el contexto y es lo que el modelo
+usa para saber qué puede hacer. El cuerpo de un skill entra solo cuando el skill
+se carga.** Cuando se contradicen, gana la tool. Subir el volumen de la prosa no
+cambia nada: ya estaba en mayúsculas.
+
+### Cómo
+
+En este orden, que es el de impacto decreciente:
+
+1. **Hacer que el camino correcto sea una tool.** Si lo correcto exige shell y lo
+   incorrecto es una llamada de tool, el agente elegirá lo incorrecto. Acá fue
+   portar `fetch_spot.py` / `fetch_fx.py` a `barchart.get_spot_price` y
+   `barchart.get_fx_spot`.
+2. **Arreglar la descripción de la tool competidora** para que deje de reclamar
+   el trabajo ajeno y apunte **por nombre** a la correcta:
+
+   > ⚠️ FUENTE: Yahoo Finance, con **15-20 minutos de rezago**. NO sirve para el
+   > precio actual. Para "¿a cuánto está?" → usá `barchart.get_spot_price`.
+
+3. **Recién ahí, el texto del skill** — incluido su `description:` de
+   frontmatter, que es lo que el agente lee al decidir si lo carga. El de
+   `precios-cacao` empezaba con *"Precios históricos … desde Yahoo Finance"*:
+   presentaba el skill entero como un skill de Yahoo.
+
+### Cómo verificar que quedó arreglado
+
+**No alcanza con que la tool exista, ni con que los números parezcan correctos.**
+Correr un turno dándole al agente **las dos** opciones y leer qué llamó de verdad:
+
+```bash
+HERMES_HOME=~/.hermes-renata …/venv/bin/python -m hermes_cli.main \
+  -z "¿a cuánto está el cacao ahora?" \
+  -t mcp-barchart,mcp-renata-cacao --skills precios-cacao
+```
+
+Y después, la evidencia — el log de sesión, no la respuesta:
+
+```bash
+# ~/.hermes-renata/sessions/session_<TS>.json → los tool_calls reales
+mcp_barchart_get_spot_price, mcp_barchart_get_fx_spot   # ← cero Yahoo ✅
+```
+
+Acotar `-t` a los toolsets de la prueba deja fuera `messaging`, así que el
+ensayo no le escribe a nadie.
+
+### Notas
+
+- **Antes de culpar al agente, mirar `tools/list`.** Su autopsia ("defaulteé a
+  la herramienta más fácil de llamar") era mecánicamente correcta; lo único
+  errado era concluir que la culpa era suya.
+- **Un agente que se disculpa y reincide no está mintiendo.** Está describiendo
+  una intención que sus herramientas no le dejan cumplir. La reincidencia diaria
+  es la señal diagnóstica: si fuera un desliz, no sería todos los días.
+- Los contratos de futuros vencen. `get_spot_price` devuelve `otros_contratos`
+  junto al pedido, para que un default caducado (`CCZ26`) se vea en la respuesta
+  en vez de fallar en silencio.
+- **Que la tool correcta falle no autoriza el fallback silencioso.** Si
+  `get_spot_price` da `ok:false`, se dice que el tiempo real no está disponible;
+  no se sirve Yahoo con cara de precio actual.
+
+---
+
+## 16. Un chequeo no debe poder degradar aquello que chequea
+
+### Por qué
+
+Los MCP con navegador re-guardan su `storage_state` al final de cada corrida:
+así las cookies frescas alargan la sesión. El patrón es correcto… hasta que lo
+hereda la función que **verifica** la sesión.
+
+```python
+# renata-meet-mcp, verify_session() — el bug
+logged_in = (not redirected) and (email is not None or "meet.google.com" in final_url)
+try:
+    await ctx.storage_state(path=STORAGE_STATE)   # ← también con la sesión muerta
+except Exception:
+    pass
+```
+
+Con la cookie caducada, el cron de chequeo sobreescribía el archivo con el
+estado **deslogueado, cuatro veces al día**. `check_session` de `barchart-mcp`
+tenía el defecto idéntico, y ahí es peor: Barchart entrega cookies de anónimo,
+así que una sesión Plus podía quedar pisada por una anónima.
+
+No fue la causa de ninguna caída —la cookie ya estaba muerta cuando esto
+ocurría— pero envenena el diagnóstico: un archivo de sesión con `mtime` de esta
+mañana invita a creer que algo lo está refrescando.
+
+### Cómo
+
+Condicionar el guardado a la señal de vida que la propia función ya calculó:
+
+```python
+if logged_in:            # renata-meet-mcp: verify_session
+    await ctx.storage_state(path=STORAGE_STATE)
+
+if alive:                # barchart-mcp: check_session (alive = not anon)
+    _save_state(ctx)
+```
+
+Cuando no hay señal de login a mano, sirve un proxy de "el run funcionó" —sin
+payload capturado no hay nada que valga la pena persistir, y sí algo que
+arruinar:
+
+```python
+if captured:             # get_spot_price
+    _save_state(ctx)
+```
+
+### Cómo verificar
+
+Por comportamiento, no leyendo el código, y **en los dos sentidos** — el riesgo
+del arreglo es haber matado el refresco legítimo:
+
+```bash
+md5sum …/storage_state.json    # antes
+# … llamar al chequeo …
+md5sum …/storage_state.json    # después
+```
+
+- Sesión **caída** → mismo hash y mismo `mtime`: el chequeo ya no pisa. ✅
+- Sesión **viva** → hash nuevo: las cookies se siguen refrescando. ✅
+
+Si solo se prueba el primer caso, un guard demasiado estricto pasa
+desapercibido y la sesión empieza a caducar antes.
+
+### Notas
+
+- El guardado del **final de una corrida real** se deja como está: ahí la sesión
+  está viva por definición, y ése es justamente el que alarga la cookie.
+- Quedan sin guard las tools que piden datos (`list_expirations`,
+  `get_options_chain`, `download_csv`): no tienen una señal barata de login, y
+  ahí una sesión caída se manifiesta como datos que no llegan, a la vista. El
+  chequeo era el caso urgente porque corre **solo y a diario**, sin nadie
+  mirando.
+- Regla general: **toda función cuyo nombre empiece por `check_`, `verify_` o
+  `test_` debería ser de solo lectura sobre lo que examina.** Si escribe, que
+  sea sobre la rama sana.
