@@ -947,6 +947,8 @@ hits = [lab for tag in botones if RX.search(lab)]   # el bot clickea hits[0]
   3 intentos/día (`_MAX_ATTEMPTS_PER_MEETING`), y los intentos fallidos se marcan
   `sent` + `superseded_by_retry` para no mandar tres avisos de la misma reunión.
   **Un `done` que no produjo nada no es un resultado: es un fallo silencioso.**
+  ⚠️ Ese `superseded_by_retry` **no bastaba** — ver más abajo, arreglado el
+  2026-09-04.
 - **Reentrada automática si Meet la expulsa** (2026-08-10). `joined:true` se
   comprobaba una vez y nunca más; el 2026-08-10 el job reportó entrada y 90 s
   después el navegador estaba en la portada de Meet "grabando" nada. El chequeo
@@ -972,6 +974,115 @@ hits = [lab for tag in botones if RX.search(lab)]   # el bot clickea hits[0]
   UTC y marca cuándo se creó el job, no cuándo era la reunión. **Un campo que el
   skill necesita y el tool no expone no da error: da un dato plausible y
   equivocado.**
+
+## Un aviso por reunión, no uno por intento (2026-09-04)
+
+### El síntoma
+
+El 4-sep salieron **cuatro avisos "⚠️ Reunión sin transcripción", tres de ellos
+por la misma reunión**:
+
+```
+09:31  ⚠️ Revisión Precios
+10:30  ⚠️ Seguimiento Rain Forest
+10:45  ⚠️ Seguimiento Rain Forest
+11:01  ⚠️ Seguimiento Rain Forest
+```
+
+Los tres jobs del Rain Forest eran legítimos: `_is_retryable()` reintenta un
+`done` con 0 líneas, y se agotaron los 3 intentos. **El reintento no es el bug** —
+es la red de seguridad que salvó al Comité Operativo el 10-ago. El bug era que
+cada intento generaba su propio aviso.
+
+### Por qué fallaba la supresión que ya existía
+
+`start_attendance` marca los intentos previos como despachados… pero solo los que
+siguen sin enviar:
+
+```python
+for j in previos:
+    if not j.get("sent"):          # ← ya era True: el resumen llegó primero
+        j["superseded_by_retry"] = True
+```
+
+**Los dos crons corren cada 15 minutos y el de resumen gana la carrera.** Marca
+`sent=True` y entrega el aviso antes de que el siguiente reintento pueda
+anularlo. Por eso los tres jobs del 4-sep quedaron con `superseded_by_retry:
+None`: la rama no llegó a ejecutarse ni una vez.
+
+Es una condición de carrera entre dos jobs periódicos del mismo scheduler, no un
+fallo de lógica dentro de ninguno de los dos. Cada uno, leído solo, es correcto.
+
+### El arreglo: agrupar en la lectura, no en la escritura
+
+En vez de intentar que el reintento alcance al aviso, se hace que el aviso no
+salga hasta que la tanda de reintentos cierre. Todo en `meet_bot.py`:
+
+**`list_jobs(only_unsent_done=True)`** devuelve **un representante por reunión**
+(el más reciente), y solo cuando corresponde:
+
+| Situación del grupo | ¿Se ofrece al resumen? |
+|---|---|
+| El más reciente tiene líneas | **Sí, ya** — es un resultado real, no se hace esperar |
+| Vacío y quedan intentos por delante | No — todavía puede haber otro |
+| Vacío y se agotaron los 3 intentos | Sí |
+| Vacío y pasaron 20 min sin intento nuevo | Sí |
+
+Esa última fila es la que impide una regresión peor que el ruido: si la reunión
+desaparece del calendario, **no llegan más reintentos y el aviso se perdería para
+siempre**. `_RETRY_GRACE_MINUTES = 20` la libera igual (el cron de entrada corre
+cada 15, así que 20 sin nada nuevo = tanda cerrada).
+
+**`mark_sent(job_id)`** cierra la reunión entera, no el intento:
+
+```python
+# los hermanos del mismo key quedan sent=True + grouped_into=<job_id>
+```
+
+Sin esto, marcar solo el procesado dejaba a los hermanos `unsent` para siempre y
+la corrida siguiente elegía otro del grupo — el mismo aviso, otra vez.
+
+### Cómo se probó (sin sembrar nada en producción)
+
+Sembrar un job `done`+`unsent` de mentira en `/data/jobs/` **habría disparado un
+correo real** a Álvaro y Pablo en la siguiente corrida del cron, que es cada 15
+minutos. En su lugar, se ejercitó el código real con `_load_jobs` sustituido
+dentro del contenedor:
+
+```bash
+docker exec renata-meet-mcp python3 -c "
+import sys; sys.path.insert(0,'/app')
+import meet_bot as m
+m._load_jobs = lambda: [ …jobs sintéticos… ]
+print(m.list_jobs(only_unsent_done=True))
+"
+```
+
+| Caso | Resultado |
+|---|---|
+| 3 intentos vacíos, tope alcanzado | solo el más reciente ✅ |
+| 1 intento vacío hace 2 min | ninguno — espera ✅ |
+| 1 intento vacío hace 40 min | lo libera ✅ |
+| 1 intento con 312 líneas | inmediato ✅ |
+| dos reuniones distintas | independientes ✅ |
+| `mark_sent` del representante | marca los hermanos con `grouped_into` ✅ |
+
+**Vale la pena tener presente el caso de los 40 minutos.** Un arreglo contra el
+ruido que se pase de estricto convierte un aviso repetido en ningún aviso, que es
+exactamente el fallo del 27-jul (11 reuniones perdidas en silencio). Al probar
+una supresión, el caso importante no es el que se suprime: es el que **no** debe
+suprimirse.
+
+### La tensión que queda abierta
+
+**Una reunión genuinamente callada es indistinguible de un fallo de subtítulos.**
+El Seguimiento Rain Forest lleva dando 0 y 1 línea desde agosto: cada vez que
+corre, quema los 3 reintentos y ahora genera un aviso. El agrupado baja el ruido
+de tres a uno, pero no responde la pregunta de fondo. Si esa reunión sigue
+avisando cada semana, la salida es marcarla como "de bajo volumen esperado" y no
+gastar reintentos en ella — a costa de perder la red de seguridad justo ahí.
+
+---
 
 ## Árbol de diagnóstico — los tres modos de falla
 
