@@ -1787,3 +1787,15 @@ mercado cerrado se diga en vez de disfrazarse de precio actual.
 - **Un contenedor "Up" no dice nada.** En los dos casos de arriba el health del
   contenedor era verde y las tools fallaban una por una. Tras reconstruir, correr
   las tools que ya existían, no solo la nueva.
+- **Al reemplazar una fuente, verificar que la nueva cubra el mismo rango — no
+  solo el mismo dato.** La fuente vieja (Yahoo `CC=F`) daba una serie
+  **continua** ya empalmada entre contratos. Barchart sirve el histórico **por
+  contrato**: pedir el símbolo "nearest" con una ventana de 18 meses devuelve la
+  vida del contrato que es front-month *hoy*, incluidas las sesiones en que
+  todavía no tenía liquidez —precio plano y `volume: 0`—. Medido: 51 de 353
+  barras. Un gráfico armado con eso dibuja un mercado que no existió, y se ve
+  perfectamente normal. Para ventanas largas hay que empalmar front-months y
+  descartar las barras sin volumen; la tool devuelve `barras_sin_negociacion`
+  para que no pase inadvertido. **Migrar de fuente no es solo cambiar la
+  llamada: los supuestos que la fuente vieja resolvía sin decirlo pasan a ser
+  tuyos.**
