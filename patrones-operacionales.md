@@ -18,6 +18,9 @@ Patrones probados en producción que extienden lo cubierto en
 12. [Sin saldo en el proveedor, un cron periódico se vuelve un spammer](#12-sin-saldo-en-el-proveedor-un-cron-periódico-se-vuelve-un-spammer) — el 402 se entrega como mensaje cada tick, tumba al agente entero y deja una marca en disco que dura una hora más que el problema.
 13. [Una tool detrás de un túnel de Cloudflare tiene 100 segundos](#13-una-tool-detrás-de-un-túnel-de-cloudflare-tiene-100-segundos) — el scraper que tardaba 95,6 s y "funcionaba"; precalentar con cron + caché corta en vez de pelear con el timeout.
 14. [Dos agentes, una cuenta externa: compartir el MCP, no duplicarlo](#14-dos-agentes-una-cuenta-externa-compartir-el-mcp-no-duplicarlo) — una sesión en vez de dos, una copia del parser en vez de dos; y el precio: es todo o nada.
+15. [Una regla escrita no le gana a una herramienta a mano](#15-una-regla-escrita-no-le-gana-a-una-herramienta-a-mano) — el agente que se disculpa y reincide a diario no desobedece: sus tools dicen otra cosa.
+16. [Un chequeo no debe poder degradar aquello que chequea](#16-un-chequeo-no-debe-poder-degradar-aquello-que-chequea) — verificar la sesión la pisaba con el estado deslogueado.
+17. [Arreglar el síntoma que reportaron deja el hueco por donde vuelve](#17-arreglar-el-síntoma-que-reportaron-deja-el-hueco-por-donde-vuelve) — la capacidad es la unidad, no el caso; y una excepción escrita en un skill autoriza la reincidencia.
 
 Todos se basan en una sola instancia de Hermes corriendo nativa (no Docker —
 esa es la forma upstream del agente; los MCPs sí van en contenedores).
@@ -1661,3 +1664,126 @@ desapercibido y la sesión empieza a caducar antes.
 - Regla general: **toda función cuyo nombre empiece por `check_`, `verify_` o
   `test_` debería ser de solo lectura sobre lo que examina.** Si escribe, que
   sea sobre la rama sana.
+
+---
+
+## 17. Arreglar el síntoma que reportaron deja el hueco por donde vuelve
+
+### Por qué
+
+Tres días después de cerrar el patrón 15, el mismo usuario reportó lo mismo:
+*"cuadramos que tomara los valores de Barchart, primera pregunta de futuros y los
+toma de Yahoo"*. Pero esta vez el agente **no estaba desobedeciendo**: estaba
+cumpliendo la regla que se había escrito al arreglar el caso anterior.
+
+El patrón 15 convirtió en tool el **precio spot**, que era lo que el usuario
+había reclamado. El **histórico intradiario** siguió sin tool. Y como la única
+forma de responder *"¿a cuánto estaba el viernes a las 8am?"* era Yahoo, el
+skill se reescribió autorizándolo:
+
+> *"la API interna de Barchart histórica devuelve 403 Forbidden … → Para estos
+> datos históricos, usar Yahoo está **explícitamente permitido**."*
+
+Tres lecciones, en orden de qué tan caro sale ignorarlas:
+
+**1. La capacidad es la unidad, no el caso reportado.** "Precio de cacao" es una
+capacidad; partirla en spot-sí / histórico-no deja exactamente el hueco por donde
+vuelve el problema. Si al arreglar algo queda una pregunta razonable del mismo
+dominio que la tool nueva no cubre, el arreglo está a medias.
+
+**2. Una excepción escrita en un skill se va a usar.** Cuando al redactar aparece
+*"para este caso está permitido usar X"*, eso no documenta un límite: autoriza la
+reincidencia. Un límite técnico se resuelve con una tool, no dándole permiso.
+
+**3. La respuesta puede estar mal con las dos mitades bien.** El spot salía de
+Barchart (`CCZ26`, Dic'26) y el histórico de Yahoo (`CC=F`, continuo): dos
+contratos distintos. La resta —"-11 USD/t, -0,18%"— no era una variación de
+mercado sino la diferencia entre dos series. **Cuando una respuesta cruza dos
+fuentes, hay que verificar que el identificador coincida, no solo la unidad.**
+
+Como bono, la respuesta traía un tercer error que ninguna regla había atajado: se
+reportó como "precio de ahora" el cierre del viernes, porque era feriado en EE.UU.
+y el mercado no había operado. La señal estaba en los datos (`volume: 0`,
+`tradeTime_ct` de otro día) y nadie la estaba mirando.
+
+### Cómo
+
+**Poner en el dato lo que el agente no puede deducir bien.** Además de crear la
+tool que faltaba (`barchart.get_price_history`, diaria e intradiaria), su
+respuesta lleva tres cosas que antes eran "que se fije el modelo":
+
+| Campo | Para qué |
+|---|---|
+| `timezone` + horas ya convertidas | Barchart sirve el intradía en Central Time. Abr-oct CT = Bogotá y el error no se ve; nov-mar difieren 1 h. Conversión con `zoneinfo`, nunca offset fijo. |
+| `aviso` cuando la última barra trae `volume: 0` | *"no hubo negociación; es el arrastre del último día operado, no un precio nuevo"*. |
+| `dias` (fecha → día de la semana) | El agente sabía que era lunes 7 y etiquetó como "viernes 5" unas barras del viernes 4. Sabía el día de hoy; contó mal hacia atrás. |
+
+El de `dias` es el más barato y el más revelador: **un número correcto con el
+rótulo equivocado es la forma más difícil de detectar de estar equivocado.** Si
+un dato depende de una cuenta que el modelo hace de memoria, se lo sirve resuelto.
+
+Y por último, **quitar la alternativa.** Con la capacidad cubierta entera, el MCP
+de Yahoo se desconectó de la config del agente:
+
+```yaml
+  # DESCONECTADO. Lo reemplazó barchart.get_price_history (spot e histórico del
+  # MISMO contrato). Se desconecta y no solo se "prohíbe": mientras
+  # get_cocoa_prices siguiera en tools/list era una tool de un solo llamado
+  # compitiendo con la correcta — la condición exacta de la reincidencia.
+  # renata-cacao:
+  #   url: http://localhost:8785/mcp
+```
+
+Antes de desconectar un MCP, revisar que ningún cronjob liste su toolset
+(`mcp-<server>`): si lo lista y la tool ya no existe, el modelo **alucina la
+llamada** en vez de fallar (ver `cronjobs.md`).
+
+### Cómo verificar
+
+Igual que en el patrón 15 —la evidencia es el log de sesión, no los números— pero
+con la pregunta **histórica**, que es la que el arreglo anterior no cubría:
+
+```bash
+HERMES_HOME=~/.hermes-renata …/venv/bin/python -m hermes_cli.main \
+  -z "precio del cacao del viernes a las 8:00 am y cómo está ahora; dame la fuente"
+```
+
+```bash
+# sessions/session_<TS>.json → los tool_calls reales
+mcp_barchart_get_price_history   # ← el punto pasado
+mcp_barchart_get_spot_price      # ← el actual, MISMO symbol
+                                 # ← cero Yahoo ✅
+```
+
+Y leer la respuesta buscando las tres cosas que antes fallaban: que el contrato
+sea el mismo en los dos extremos, que el día esté bien nombrado, y que un
+mercado cerrado se diga en vez de disfrazarse de precio actual.
+
+### Notas
+
+- **El endpoint histórico bueno de Barchart no era el documentado.**
+  `/proxies/core-api/v1/historical/get` da 403 por curl y filas basura
+  (`tradeTime: "01/01/70"`, `lastPrice: "N/A"`) desde el navegador. El que sirve
+  es `/proxies/timeseries/historical/queryeod.ashx` (diario) y
+  `queryminutes.ashx?interval=<min>` (intradía), que son los que consume el
+  gráfico interactivo. Devuelven **CSV sin encabezado**; con símbolo continuo
+  (`CC*0`) anteponen el contrato resuelto, así que hay que parsear detectando si
+  el primer campo es una fecha, no por posición fija. Símbolo inexistente =
+  **HTTP 200 con cuerpo vacío**, no un error.
+- **Solo funciona desde dentro del navegador:** `fetch(url, {credentials:
+  'include'})` ejecutado en una página del sitio, dentro del contenedor. Con curl
+  desde el host, aun con todas las cookies del `storage_state.json` y el
+  `X-XSRF-TOKEN` decodificado, CloudFront responde `Forbidden`. No es la sesión:
+  es que la petición no viene del navegador.
+- **Dos gotchas del rebuild**, que aparecieron al tocar un contenedor que llevaba
+  meses sin reconstruirse y no tienen nada que ver con el cambio:
+  - `requirements.txt` decía `playwright>=1.49` y pip trajo 1.62 contra una
+    imagen base `v1.59.0-jammy`. Todas las tools murieron con *"Executable
+    doesn't exist at /ms-playwright/chromium_headless_shell-*"*, con el
+    contenedor arriba y sano por fuera. **Pinear la librería a la imagen base**
+    y subir ambas juntas.
+  - Instalar `tzdata` sin `DEBIAN_FRONTEND=noninteractive` cuelga el build en el
+    diálogo de zona geográfica: 20 minutos sin una línea de output.
+- **Un contenedor "Up" no dice nada.** En los dos casos de arriba el health del
+  contenedor era verde y las tools fallaban una por una. Tras reconstruir, correr
+  las tools que ya existían, no solo la nueva.
