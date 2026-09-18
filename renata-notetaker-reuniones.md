@@ -525,7 +525,14 @@ estable y no algo intermitente.
 `Notetaker chequeo sesion` avisa cuando la sesión **ya** caducó, y para entonces
 se han perdido 1–2 reuniones aunque el aviso funcione perfecto. Con el periodo
 de la cookie fijado en 14 días, `Notetaker re-sembrado preventivo` avisa **a los
-12**, dejando dos días de margen.
+11**, dejando 2-3 días de margen.
+
+**El umbral se puso primero en 12 y estaba mal por el truncado.** `(now -
+desde).days` descarta las horas, así que con el reloj sembrado a mediodía el
+aviso no salía hasta la mañana del día 13 — un solo día antes de la caducidad
+esperada. Con 11 cae en el día 11 o 12 según la hora del re-sembrado. Al elegir
+un umbral en días enteros, comprobarlo contra la hora real de la corrida, no
+contra el número.
 
 Corre `scripts/reseed_due.py` en modo **`no_agent`**: sin LLM, sin tokens, stdout
 vacío = silencio. Un watchdog determinista no puede alucinar una entrega, que es

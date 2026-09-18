@@ -32,9 +32,12 @@ from pathlib import Path
 STORAGE = Path("/home/aroco/projects/data/renata-meet/storage_state.json")
 STATE = Path("/home/aroco/projects/data/renata-meet/.reseed_clock.json")
 
-# Avisar a los 12 días: deja 2 días de margen sobre los 14 observados, que es
-# tiempo de sobra para agendar 5 minutos en una Mac.
-UMBRAL_DIAS = 12
+# Avisar a los 11 días. Ojo con el truncado: `(now - desde).days` descarta las
+# horas, así que un umbral de 12 con el reloj sembrado a mediodía no dispara
+# hasta el día 13 por la mañana — un solo día antes de la caducidad. Con 11 el
+# aviso cae en el día 11 o 12 según la hora del re-sembrado, o sea 2-3 días de
+# margen sobre los 14 observados.
+UMBRAL_DIAS = 11
 
 
 def sid_hash(path: Path) -> str | None:
