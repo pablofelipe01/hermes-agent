@@ -520,6 +520,39 @@ Los cinco `nojoin_*` del 2-sep pesaban exactamente lo mismo (27.367 bytes): mism
 pantalla en los cinco intentos, otra pista barata de que es un modo de falla
 estable y no algo intermitente.
 
+#### Aviso preventivo de re-sembrado (cron `1e77ee05d4fc`, desde 2026-09-18)
+
+`Notetaker chequeo sesion` avisa cuando la sesión **ya** caducó, y para entonces
+se han perdido 1–2 reuniones aunque el aviso funcione perfecto. Con el periodo
+de la cookie fijado en 14 días, `Notetaker re-sembrado preventivo` avisa **a los
+12**, dejando dos días de margen.
+
+Corre `scripts/reseed_due.py` en modo **`no_agent`**: sin LLM, sin tokens, stdout
+vacío = silencio. Un watchdog determinista no puede alucinar una entrega, que es
+exactamente el fallo que costó 8 días de avisos perdidos en julio.
+
+**El ancla es la cookie `SID`, no el mtime del archivo.** Es el detalle que hace
+que esto funcione:
+
+- El `mtime` del `storage_state.json` **no** sirve: el bot lo reescribe tras cada
+  asistencia y tras cada `verify_session` con la sesión viva. Su mtime dice
+  "última vez que algo funcionó", no "cuándo se sembró" — el día de la caducidad
+  del 18-sep el archivo tenía mtime de esa misma mañana.
+- Las **expiraciones de las cookies** tampoco: la más corta (`COMPASS`) va a ~9
+  días y se renueva sola; `SID` declara 399. El límite de 14 días es un challenge
+  del lado de Google ("Demuestra que eres tú"), probablemente por la IP de
+  datacenter, y no está escrito en el archivo.
+- `SID` **cambia en cada login interactivo y sobrevive a las re-escrituras**
+  (verificado contra los tres backups: 19-ago, 4-sep y 18-sep dan hashes
+  distintos). Así que un cambio de `SID` *es* un re-sembrado: el script guarda su
+  hash en `/data/renata-meet/.reseed_clock.json` y reinicia el reloj solo. Nadie
+  tiene que anotar nada, y el aviso se apaga solo tras el re-sembrado.
+
+Se guarda **solo el hash** del SID: el valor es una credencial de sesión.
+
+Probado en las cuatro ramas (reloj nuevo, 11 días, 13 días, SID cambiado) y luego
+por el scheduler real: `silent (empty output)`, `last_status: ok`.
+
 **El re-sembrado lo hace una persona, no el servidor.** Se pregunta cada vez, así
 que conviene decirlo al reportar la falla en lugar de esperar la pregunta: hace
 falta un navegador con pantalla y el 2FA de `renata@aroco.co`, y Google bloquea
