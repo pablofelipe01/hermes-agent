@@ -470,16 +470,27 @@ Fase 2 (sembrar en la Mac y subir), repetido.
 | 2026-07-27 | 2026-08-04 | ~11 (3 comités el 3-ago; "Revisión CRM y Plataformas" el 4-ago) | Pablo lo notó otra vez — el cron **sí** detectaba pero no avisaba (ver gotcha abajo) |
 | 2026-08-18, entre 12:50 y 15:15 | 2026-08-19 | 1 ("Revisión CRM y Plataformas" del 18-ago, 3 intentos `no_join_button`) | ✅ **el cron de chequeo avisó por Signal** la mañana siguiente — primera caducidad detectada *y* notificada por el mecanismo |
 | 2026-09-01/02, entre 15:15 y 08:45 | 2026-09-02 | 2 ("Revisión Precios" y "Seguimiento Rain Forest" del 2-sep) | ✅ el cron avisó cada mañana; se atendió el 4-sep — segunda caducidad detectada *y* notificada |
+| 2026-09-18, entre 06:30 y 07:16 | 2026-09-18 | 2 ("Pablo - Alvaro" 07:30 y "Seguimiento Rain Forest" 10:00) | ✅ el cron de las 09:30 avisó por Signal sin error — tercera detectada *y* notificada; re-sembrada el mismo día a las 12:42 |
 
-Duración observada de la cookie: **2–3 semanas** sin asistencias que la renueven.
-Re-sembrada el 2026-08-04 a las 16:04, el 2026-08-19 a las 08:58 y el 2026-09-04
-a las 07:53 (las tres veces `logged_in:true`, `meet.google.com/home`).
+Duración observada de la cookie: **2 semanas** sin asistencias que la renueven
+(el rango "2–3 semanas" de las primeras caducidades ya no describe los datos; ver
+abajo). Re-sembrada el 2026-08-04 a las 16:04, el 2026-08-19 a las 08:58, el
+2026-09-04 a las 07:53 y el 2026-09-18 a las 12:42 (las cuatro veces
+`logged_in:true`, `meet.google.com/home`).
 
 Con la caducidad del 2-sep el rango se estrecha por abajo: **14 días justos**
 desde la re-sembrada del 19-ago, casi calcados a los ~14 del tramo
 4-ago → 18-ago. Dos intervalos seguidos de dos semanas sugieren que el techo
 real está más cerca de 2 semanas que de 3, y que conviene leer el aviso del cron
 como el mecanismo primario, no como red de seguridad.
+
+La del 18-sep cierra la discusión: **14 días justos** otra vez, desde la
+re-sembrada del 4-sep. Tres intervalos consecutivos de dos semanas exactas
+(4-ago→18-ago, 19-ago→2-sep, 4-sep→18-sep) no son dispersión, son el periodo de
+la cookie. Consecuencia práctica: **re-sembrar por calendario cada ~12 días en
+vez de esperar el aviso**. El aviso sigue siendo la red de seguridad, pero cada
+caducidad cuesta 1–2 reuniones aunque el aviso funcione perfecto, porque llega
+cuando el daño ya empezó. Próxima ventana estimada: ~2026-10-02.
 
 **El arreglo del 4-ago quedó validado en producción el 19-ago:** el aviso llegó
 por Signal a primera hora y el re-sembrado se hizo esa misma mañana. Coste: 1
@@ -508,6 +519,14 @@ distingue los dos modos de un vistazo, sin releer logs:
 Los cinco `nojoin_*` del 2-sep pesaban exactamente lo mismo (27.367 bytes): misma
 pantalla en los cinco intentos, otra pista barata de que es un modo de falla
 estable y no algo intermitente.
+
+**El re-sembrado lo hace una persona, no el servidor.** Se pregunta cada vez, así
+que conviene decirlo al reportar la falla en lugar de esperar la pregunta: hace
+falta un navegador con pantalla y el 2FA de `renata@aroco.co`, y Google bloquea
+el login headless. Ni Claude en el servidor ni la propia Renata pueden hacerlo.
+Todo lo demás —diagnóstico, backup del `storage_state`, verificación posterior—
+sí es automatizable y conviene dejarlo hecho antes de pasarle el bloque de
+comandos a quien lo vaya a correr.
 
 #### Fricciones del re-sembrado (vistas el 2026-08-19)
 
