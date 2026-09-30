@@ -417,45 +417,59 @@ Google bloquea el login headless, así que hay que loguearse **una vez de forma
 interactiva** en una Mac y subir el `storage_state`. Es el mismo método de la
 Fase 2 (sembrar en la Mac y subir), repetido.
 
-1. En la Mac, dentro de un venv:
+1. **Venv con Playwright.** ⚠️ El venv NO sobrevive entre re-sembrados: van
+   ~12 días de diferencia y en la práctica cada vez hay que rehacerlo (pasó el
+   30-sep: `ModuleNotFoundError: No module named 'playwright'` al correr el
+   script con el Python del sistema). Primero mirar si queda alguno:
    ```bash
-   mkdir -p ~/Desktop/renata && cd ~/Desktop/renata
-   python3 -m venv venv && source venv/bin/activate
-   pip install playwright && python3 -m playwright install chromium
+   ls -d ~/venv* ~/.venvs/* ~/playwright* 2>/dev/null
    ```
-2. Bajar `reseed_renata.py` — está versionado en este repo, en
-   [`scripts/reseed_renata.py`](./scripts/reseed_renata.py):
+   Si no hay, crearlo — 30 s:
    ```bash
-   scp aroco@<server>:/home/aroco/projects/repos/hermes-agent/scripts/reseed_renata.py .
+   python3 -m venv ~/venv-reseed
+   source ~/venv-reseed/bin/activate
+   pip install --upgrade pip && pip install playwright
    ```
-   (headed; abre Google, esperas a estar DENTRO como `renata@aroco.co`, pulsas
-   Enter, comprueba Meet y guarda el archivo solo si NO rebotó al login):
-   ```python
-   from playwright.sync_api import sync_playwright
-   OUT = "storage_state_renata.json"
-   with sync_playwright() as p:
-       b = p.chromium.launch(headless=False)
-       c = b.new_context(locale="es-ES", viewport={"width":1280,"height":800})
-       pg = c.new_page(); pg.goto("https://accounts.google.com/", wait_until="load")
-       input(">>> Inicia sesion como renata@aroco.co; cuando estes DENTRO pulsa Enter...")
-       pg.goto("https://meet.google.com/", wait_until="load"); pg.wait_for_timeout(3000)
-       if "accounts.google.com" in pg.url or "signin" in pg.url:
-           print("[X] Sigue en login, NO se guardo. Reintenta.")
-       else:
-           c.storage_state(path=OUT); print("[OK] Guardado:", OUT, "| Meet:", pg.url)
-       b.close()
-   ```
+   `playwright install chromium` (~150 MB) **solo** si falla el paso 3: el script
+   usa `channel="chrome"`, o sea el Chrome del sistema, y cae a Chromium nada más
+   como fallback.
+2. Bajar `reseed_renata.py`, versionado en este repo en
+   [`scripts/reseed_renata.py`](./scripts/reseed_renata.py). El host es la IP de
+   Tailscale — no escribir `<server>` literal, zsh lo lee como redirección:
    ```bash
-   python3 reseed_renata.py    # entra como renata@aroco.co (+ 2FA), Enter al estar dentro
+   scp aroco@100.89.179.48:projects/repos/hermes-agent/scripts/reseed_renata.py ~/
    ```
-3. Subir al server, reemplazando el archivo:
+3. Correr (headed). Abre Chrome; **el Enter va DESPUÉS** de completar el login
+   como `renata@aroco.co` con 2FA, no antes. El script guarda
+   `~/storage_state_renata.json` inmediatamente al pulsarlo, antes de comprobar
+   Meet, para que quede archivo que inspeccionar aunque la comprobación falle:
    ```bash
-   scp storage_state_renata.json aroco@<server>:/home/aroco/projects/data/renata-meet/storage_state.json
+   python ~/reseed_renata.py
    ```
-4. Verificar con el comando de diagnóstico → `logged_in:true`. **No** hace falta
-   reiniciar el contenedor: el bot lee el archivo fresco en cada asistencia (el
-   volumen `/data` está montado rw). Y como cuando está caducada **no hay
-   asistencias vivas** (todas en error), tampoco aplica el Riesgo #1.
+4. Subir al server, reemplazando el archivo:
+   ```bash
+   scp ~/storage_state_renata.json aroco@100.89.179.48:projects/data/renata-meet/storage_state.json
+   ```
+   **Verificar que llegó de verdad**, que ya ha pasado darlo por subido sin
+   estarlo. La prueba buena no es el `mtime` ni el `md5` (ambos cambian también
+   si el bot reescribe el archivo) sino el **hash de la cookie `SID`**, que solo
+   cambia con un login interactivo nuevo — es el mismo ancla que usa el cron
+   preventivo, y se compara contra el que guardó la vez anterior:
+   ```bash
+   python3 -c "
+   import json,hashlib
+   d=json.load(open('/home/aroco/projects/data/renata-meet/storage_state.json'))
+   sid=[c for c in d['cookies'] if c.get('name')=='SID']
+   print(hashlib.sha256(sid[0]['value'].encode()).hexdigest() if sid else '!! sin SID')"
+   cat /home/aroco/projects/data/renata-meet/.reseed_clock.json   # el hash anterior
+   ```
+   Luego el diagnóstico → `logged_in:true`. **No** hace falta reiniciar el
+   contenedor: el bot lee el archivo fresco en cada asistencia (`/data` montado
+   rw). Si se re-sembró de forma preventiva (con la sesión aún viva) puede haber
+   asistencias en curso, así que **con más razón no tocar el contenedor** — ver
+   Riesgo #1.
+   Opcional, para no esperar al cron de las 7:10: re-anclar el reloj a mano con
+   `python3 ~/.hermes-renata/scripts/reseed_due.py` (stdout vacío = correcto).
 5. (Opcional) Prueba real: crea un Meet, `start_attendance(url=...)`, y confirma
    `status:"in_call"` con `list_jobs` — deberías ver a Renata entrar.
 
@@ -491,6 +505,28 @@ la cookie. Consecuencia práctica: **re-sembrar por calendario cada ~12 días en
 vez de esperar el aviso**. El aviso sigue siendo la red de seguridad, pero cada
 caducidad cuesta 1–2 reuniones aunque el aviso funcione perfecto, porque llega
 cuando el daño ya empezó. Próxima ventana estimada: ~2026-10-02.
+
+✅ **Y así se hizo: re-sembrado preventivo el 2026-09-30 a las 08:45, a los 12
+días, con la sesión todavía viva** (`verify_session` → `logged_in:true` antes de
+tocar nada). **Cero reuniones perdidas — la primera vez que el re-sembrado
+ocurre antes de la caducidad en vez de después**; las cuatro anteriores costaron
+entre 1 y ~11 reuniones cada una aunque el aviso funcionara perfecto.
+
+El disparador fue el recordatorio de calendario del 30-sep 08:00 en
+`data@inverseneurallab.com`, puesto a mano el 18-sep; queda uno nuevo para el
+**12-oct 08:00** (el día 11 caía domingo, y 12 días dejan el mismo margen de 2
+días sobre los 14 que funcionó esta vez). El cron preventivo (`1e77ee05d4fc`,
+umbral 11 días) sigue siendo la red de seguridad, no el disparador.
+
+Dos notas operacionales de esta corrida:
+
+- **Confirmación de que el archivo subió: la cookie `SID` cambió**
+  (`9da9da43…` → `add4d182…`). Es mejor prueba que el `md5` o el `mtime`, que
+  cambian también cuando el bot reescribe el archivo por su cuenta.
+- El reloj de `.reseed_clock.json` se re-ancló a mano corriendo
+  `reseed_due.py`, que al ver el `SID` nuevo reinicia y calla. No hubo aviso en
+  falso, pero conviene saber que si no se corre, el re-anclaje lo hace solo el
+  cron de las 7:10 del día siguiente.
 
 **El arreglo del 4-ago quedó validado en producción el 19-ago:** el aviso llegó
 por Signal a primera hora y el re-sembrado se hizo esa misma mañana. Coste: 1
