@@ -485,6 +485,7 @@ Fase 2 (sembrar en la Mac y subir), repetido.
 | 2026-08-18, entre 12:50 y 15:15 | 2026-08-19 | 1 ("Revisión CRM y Plataformas" del 18-ago, 3 intentos `no_join_button`) | ✅ **el cron de chequeo avisó por Signal** la mañana siguiente — primera caducidad detectada *y* notificada por el mecanismo |
 | 2026-09-01/02, entre 15:15 y 08:45 | 2026-09-02 | 2 ("Revisión Precios" y "Seguimiento Rain Forest" del 2-sep) | ✅ el cron avisó cada mañana; se atendió el 4-sep — segunda caducidad detectada *y* notificada |
 | 2026-09-18, entre 06:30 y 07:16 | 2026-09-18 | 2 ("Pablo - Alvaro" 07:30 y "Seguimiento Rain Forest" 10:00) | ✅ el cron de las 09:30 avisó por Signal sin error — tercera detectada *y* notificada; re-sembrada el mismo día a las 12:42 |
+| 2026-10-13, entre 12:30 y 12:32 — **cierre remoto, no caducidad** (18 h después de la re-siembra preventiva) | 2026-10-13 15:31 (cron) | 5 (una el 13-oct, una el 14-oct, una el 15-oct y dos el 16-oct, entre ellas "Seguimiento Rain Forest") | ⚠️ el cron avisó por Signal cada 3 h (~12 avisos) y **nadie lo leyó en 3 días**; Pablo lo notó el 16-oct, re-sembrada a las 12:50 |
 
 Duración observada de la cookie: **2 semanas** sin asistencias que la renueven
 (el rango "2–3 semanas" de las primeras caducidades ya no describe los datos; ver
@@ -551,10 +552,62 @@ distingue los dos modos de un vistazo, sin releer logs:
 |---|---|
 | **"Demuestra que eres tú — Vuelve a iniciar sesión para continuar"**, con el avatar de `renata@aroco.co` | sesión caducada → re-sembrar |
 | Botón azul **"Cambiar aquí"** en la pantalla de pre-entrada | sesión fantasma → *no* re-sembrar (ver más abajo) |
+| **"¿Cómo te llamas?"** + botón **"Solicitar unirse"**, y "Acceder" arriba a la derecha (screenshot `timeout_*`, no `nojoin_*`) | sesión cerrada desde Google → el bot entra como **anónimo** → re-sembrar (ver "Caída del 13-oct") |
 
 Los cinco `nojoin_*` del 2-sep pesaban exactamente lo mismo (27.367 bytes): misma
 pantalla en los cinco intentos, otra pista barata de que es un modo de falla
 estable y no algo intermitente.
+
+#### Caída del 13-oct: sesión cerrada por Google 18 h después de re-sembrar
+
+El 2º preventivo se hizo el **12-oct a las 18:47**, con la sesión aún viva, y
+quedó bien: `verify_session` → `logged_in:true` y el `SID` cambió de
+`add4d182…` a `0138264f…`. Al día siguiente, el **13-oct entre 12:30 y 12:32**,
+Google invalidó la sesión **en plena reunión**. El chequeo de las 12:30 dio
+`[SILENT]`, y a las 12:32 el bot quedó fuera del Comité Financiero, que igual
+grabó 383 líneas y terminó con `ended_reason:"expulsada"` tras 3 reentradas
+fallidas. No fue la caducidad de 14 días: habían pasado ~18 horas.
+
+**En qué se diferencia de una caducidad:**
+
+- **Las cookies siguen intactas.** El `storage_state.json` conservaba el `SID`
+  de la re-siembra (`0138264f…`) con vencimientos en 2027. Google cerró la
+  sesión de su lado, y nada en el archivo lo delata.
+- **Otra firma.** No aparece "Demuestra que eres tú" ni `no_join_button`. Meet
+  trata al bot como **invitado anónimo**: pregunta "¿Cómo te llamas?", ofrece
+  "Solicitar unirse" y arriba muestra "Acceder". El bot pulsa ese botón,
+  queda en `asked_to_join`, nadie admite a un anónimo y a los 90 s termina con
+  `state:"asked_to_join_timeout"`. Los screenshots son `timeout_*`, todos con el
+  mismo tamaño (55.931 bytes). En el log aparece además el modal "Accede con tu
+  Cuenta de Google — en vez de esperar a que te permitan ingresar…", otra
+  señal de que el bot no tiene sesión.
+- `verify_session` sí lo detecta (`logged_in:false`, `final_url` en
+  `workspace.google.com/products/meet/`), así que el cron de chequeo avisó desde
+  las 15:31 del mismo día.
+
+**Causa:** desconocida desde el servidor. Encaja con un cierre de sesión
+remoto: cambio de contraseña, "cerrar sesión en todos los dispositivos", una
+acción del admin de Workspace o una alerta de seguridad de Google. La actividad
+de seguridad de `renata@aroco.co` (myaccount → Seguridad) es el único lugar
+donde se puede ver cuál fue.
+
+**Lecciones:**
+
+1. **La re-siembra preventiva protege de la caducidad de 14 días, no de un
+   cierre remoto.** El calendario de ~12 días no reemplaza leer el aviso.
+2. **Esta vez el aviso tampoco se leyó.** Salieron ~12 avisos por Signal en 3
+   días y ninguno se atendió: 5 reuniones perdidas, el peor resultado desde
+   agosto. Es el mismo modo de falla del 18-sep ("el aviso llega pero no se
+   lee"), con más costo, porque ahora no había un recordatorio de calendario
+   cerca que lo compensara.
+3. **Primero confirmar que el `scp` llegó.** En la re-siembra del 16-oct el
+   primer intento no llegó: se copió una ruta de ejemplo (`~/ruta/a/...`) y el
+   script nunca corrió. Revisar el hash del `SID` lo detectó de inmediato. El
+   comando bueno es el del paso 2 del Remedio: bajar el script con `scp` a `~/`.
+
+Re-sembrada el **2026-10-16 a las 12:50** (`SID` `0138264f…` → `304b2304…`,
+`verify_session` OK, reloj re-anclado a mano). Próximo recordatorio de
+calendario: **28-oct 08:00**.
 
 #### Aviso preventivo de re-sembrado (cron `1e77ee05d4fc`, desde 2026-09-18)
 
