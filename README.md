@@ -16,3 +16,6 @@ Playbook de despliegue del agente Hermes en producción AROCO.
 - [`renata-notetaker-reuniones.md`](./renata-notetaker-reuniones.md) — flujo para
   que Renata asista a los Google Meet de AROCO, transcriba y resuma (gcalendar +
   meet bot + cron/skill). Fase 1 desplegada.
+- [`renata-pendientes-comites.md`](./renata-pendientes-comites.md) — temas
+  pendientes para los comités semanales: se dejan por Signal, Renata manda la
+  agenda el día hábil anterior y los cierra en el acta.
