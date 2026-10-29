@@ -657,6 +657,10 @@ Todo lo demás —diagnóstico, backup del `storage_state`, verificación poster
 sí es automatizable y conviene dejarlo hecho antes de pasarle el bloque de
 comandos a quien lo vaya a correr.
 
+**Re-siembras preventivas después de la caída del 13-oct:** 2026-10-29 08:53, a
+los 13 días, con la sesión aún viva (`SID` `304b2304…` → `3c46593e…`, sin
+fricciones). Próxima por calendario: 10-nov.
+
 #### Fricciones del re-sembrado (vistas el 2026-08-19)
 
 El procedimiento funciona, pero costó tres intentos por detalles del entorno.
@@ -1232,6 +1236,94 @@ gastar reintentos en ella — a costa de perder la red de seguridad justo ahí.
 
 ---
 
+## Meet movió el toggle de subtítulos (27-oct-2026)
+
+### Síntoma
+
+Desde la mañana del 27-oct **todas** las asistencias terminaron en
+`status:"done"`, `lines:0`, `captions_ok:false`: 8 reuniones seguidas en dos
+días. Renata entraba, se quedaba hasta el final (`ended_reason:"alone"`) y no
+grababa nada. La sesión de Google estaba sana (`verify_session` →
+`logged_in:true`), así que ni el cron de chequeo ni el aviso preventivo tenían
+nada que decir. La última asistencia buena fue el 26-oct (176 líneas).
+
+### Causa
+
+Google cambió la barra de Meet. El botón **"Activar subtítulos"** ya no está en
+la barra: ahora hay un botón **"Subtítulos y traducción"** (icono
+`translate_cc`) que abre un panel, y el toggle "Activar subtítulos" está
+**dentro** de ese panel. `_enable_captions` buscaba el label exacto en la barra
+(y su fallback, en el menú ⋮); no lo encontraba en ninguno de los dos y
+devolvía `False`.
+
+**Pista falsa:** las capturas `captions_fail_*` muestran un banner azul *"Ya no
+se admite esta versión del navegador"*. Viene del user-agent (Chrome 124) y del
+Chromium de la imagen (Playwright 1.48), pero **no era la causa**: con ese mismo
+navegador los subtítulos activan bien en cuanto se usa el botón nuevo. Queda
+anotado como riesgo futuro (ver "Futuro").
+
+### Arreglo (2026-10-29)
+
+`_enable_captions_via_panel()` en `meet_bot.py`, como tercer intento dentro de
+`_enable_captions` (después de la barra y del menú ⋮):
+
+1. Si el botón "Subtítulos y traducción" existe y no está `aria-pressed="true"`,
+   clickearlo y luego clickear "Activar subtítulos" (el mismo regex exacto de
+   siempre) dentro del panel.
+2. Si eso falla, cerrar el panel con Escape y usar el atajo de Meet
+   **Mayús+C**, que monta la región de subtítulos igual que el click.
+
+Con los subtítulos activos el botón queda `aria-pressed="true"` y aparecen
+"Abrir ajustes de subtítulos", "Tamaño de fuente" y "Color del texto". La región
+`div[role="region"][aria-label="Subtítulos"]` sigue siendo la misma, así que
+`CaptionCollector` y `_set_caption_language` no cambiaron.
+
+### Cómo se probó sin una reunión real
+
+Una sonda en un **contenedor desechable** de la misma imagen, con una **copia**
+del `storage_state` (así el bot de producción no se toca y la sesión real no se
+reescribe):
+
+```bash
+P=<dir de pruebas>; mkdir -p $P/data/debug
+cp ~/projects/data/renata-meet/storage_state.json $P/data/
+docker run --rm --init --shm-size 1g -e STORAGE_STATE=/data/storage_state.json \
+  -v $P/data:/data -v $P/probe.py:/probe.py:ro \
+  -v ~/projects/agents/renata-meet-mcp/meet_bot.py:/app/meet_bot.py:ro \
+  renata-meet-mcp-renata-meet-mcp python /probe.py
+```
+
+La sonda va a **`https://meet.google.com/new`**: Renata crea una reunión
+instantánea sin invitados y **entra directo**, sin botón "Unirse" (por eso
+`_join()` da `no_join_button` ahí: hay que saltárselo y comprobar `_in_call()`).
+Dentro, volcar los `aria-label` de todos los botones antes y después de cada
+click es lo que mostró el cambio de UI. Resultado con el código parchado:
+`captions_ok:True`, idioma "Español (México)", región montada.
+
+Montar `meet_bot.py` como volumen permite probar el parche **antes** de
+reconstruir la imagen de producción.
+
+### ⚠️ El rebuild mató un job en espera
+
+`docker compose up -d --build` se lanzó con 0 procesos de Chrome y ningún job
+activo… pero el cron había creado a las :45 un job `waiting` para la reunión de
+las 9:00. El reinicio mató la tarea asyncio que esperaba, y el job quedó
+**huérfano en `waiting`**. Eso es peor que un error: `_is_retryable()` no
+acepta `waiting`, así que el anti-duplicado **bloquea la sala el resto del día**.
+
+Remedio: marcar el job huérfano como `error` y relanzar `start_attendance` con
+la misma `url`, `title` y `start_at`. Los archivos de jobs son de root, así que
+hay que editarlos desde dentro del contenedor:
+
+```bash
+docker exec renata-meet-mcp python -c "import json;p='/data/jobs/<job>.json';\
+d=json.load(open(p));d.update(status='error',sent=True);json.dump(d,open(p,'w'))"
+```
+
+**Antes de reconstruir: `list_jobs` sin `waiting`/`joining`/`in_call`, no solo
+0 procesos de Chrome.** Y mejor hacerlo justo después de una :15 o una :45
+(cuando corre el cron), no justo antes.
+
 ## Árbol de diagnóstico — los tres modos de falla
 
 Actualizado 2026-08-10. **Los tres se parecen desde fuera** ("Renata no tomó
@@ -1260,6 +1352,9 @@ notas") y tienen causas y remedios distintos. Recorrer en este orden:
     │                       Mirar debug/captions_fail_*.png:
     │                       ¿hay un MODAL encima? (Read AI, avisos de Google)
     │                       Si sí: mirar el log del modal en docker logs.
+    │                       Si NO y falla en TODAS las reuniones desde un día
+    │                       concreto: Google cambió la UI → sonda en
+    │                       meet.google.com/new (ver "Meet movió el toggle").
     │
     └─ captions_ok:true ──► subtítulos activos pero nadie habló, o Meet no
                             generó captions. Comprobar ended_reason:
@@ -1301,3 +1396,10 @@ notas" en la pantalla de pre-entrada — tres notetakers disponibles a la vez.
 
 Integrar con el CRM de AROCO y con los calendarios del equipo; transcripción de
 alta fidelidad con Whisper; manejo de reuniones solapadas.
+
+**Riesgo pendiente — navegador "no admitido".** Desde oct-2026 Meet muestra el
+banner "Ya no se admite esta versión del navegador" (user-agent Chrome 124,
+Chromium de Playwright 1.48). Hoy no rompe nada, pero es candidato a la próxima
+falla. Arreglo previsto: subir la imagen base a una Playwright reciente y
+alinear `_UA` con la versión real de Chromium, probándolo antes con la sonda de
+`meet.google.com/new`.
