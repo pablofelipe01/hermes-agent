@@ -659,7 +659,10 @@ comandos a quien lo vaya a correr.
 
 **Re-siembras preventivas después de la caída del 13-oct:** 2026-10-29 08:53, a
 los 13 días, con la sesión aún viva (`SID` `304b2304…` → `3c46593e…`, sin
-fricciones). Próxima por calendario: 10-nov.
+fricciones); 2026-11-10 07:46, a los 12 días, sesión aún viva y sin jobs
+activos (`SID` `3c46593e…` → `b2458d6f…`, `verify_session` OK, reloj re-anclado
+con `reseed_due.py`). Las dos con coste 0 reuniones. Próxima por calendario:
+viernes 20-nov (el día 12 cae domingo).
 
 #### Fricciones del re-sembrado (vistas el 2026-08-19)
 
