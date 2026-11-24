@@ -486,6 +486,7 @@ Fase 2 (sembrar en la Mac y subir), repetido.
 | 2026-09-01/02, entre 15:15 y 08:45 | 2026-09-02 | 2 ("Revisión Precios" y "Seguimiento Rain Forest" del 2-sep) | ✅ el cron avisó cada mañana; se atendió el 4-sep — segunda caducidad detectada *y* notificada |
 | 2026-09-18, entre 06:30 y 07:16 | 2026-09-18 | 2 ("Pablo - Alvaro" 07:30 y "Seguimiento Rain Forest" 10:00) | ✅ el cron de las 09:30 avisó por Signal sin error — tercera detectada *y* notificada; re-sembrada el mismo día a las 12:42 |
 | 2026-10-13, entre 12:30 y 12:32 — **cierre remoto, no caducidad** (18 h después de la re-siembra preventiva) | 2026-10-13 15:31 (cron) | 5 (una el 13-oct, una el 14-oct, una el 15-oct y dos el 16-oct, entre ellas "Seguimiento Rain Forest") | ⚠️ el cron avisó por Signal cada 3 h (~12 avisos) y **nadie lo leyó en 3 días**; Pablo lo notó el 16-oct, re-sembrada a las 12:50 |
+| 2026-11-24, entre 06:30 y 08:15 — **preventivo del 20-nov no hecho** (14 días justos desde la re-siembra del 10-nov) | 2026-11-24 09:30 (cron) | 4 (todas las del 24-nov con Meet, desde las 08:00 hasta las 15:30) | ⚠️ el aviso **preventivo** salió el 22, 23 y 24-nov y el de caducidad a las 09:30, 12:30 y 15:30; se re-sembró a las 18:24 |
 
 Duración observada de la cookie: **2 semanas** sin asistencias que la renueven
 (el rango "2–3 semanas" de las primeras caducidades ya no describe los datos; ver
@@ -663,6 +664,23 @@ fricciones); 2026-11-10 07:46, a los 12 días, sesión aún viva y sin jobs
 activos (`SID` `3c46593e…` → `b2458d6f…`, `verify_session` OK, reloj re-anclado
 con `reseed_due.py`). Las dos con coste 0 reuniones. Próxima por calendario:
 viernes 20-nov (el día 12 cae domingo).
+
+**El preventivo del 20-nov no se hizo, y la sesión caducó el 24-nov.** El
+recordatorio del calendario pasó sin atenderse, y el cron preventivo avisó tres
+mañanas seguidas (22, 23 y 24-nov) sin que nadie lo leyera. La sesión murió el
+**24-nov entre las 06:30 y las 08:15**: el chequeo de las 06:30 dio `[SILENT]`, y
+el primer `no se pudo entrar` (screenshot `nojoin_*`, `verify_session` →
+`accounts.google.com/.../confirmidentifier`) fue a las 08:15. Fueron **14 días
+justos**, igual que las caducidades de septiembre. La última asistencia buena
+fue el 23-nov (72 líneas, salida `alone`). Costó **4 reuniones**, todas las del
+día. Re-sembrada el **2026-11-24 a las 18:24** (`SID` `b2458d6f…` → `20ad3272…`,
+`verify_session` OK, reloj re-anclado con `reseed_due.py`). Próxima por
+calendario: **viernes 4-dic** (el día 12 cae domingo).
+
+Lección: el mecanismo funcionó entero (recordatorio, 3 avisos preventivos, aviso
+de caducidad) y aun así se perdió el día. Saltarse el preventivo cuesta lo mismo
+que no tener preventivo, porque el margen entre el día 12 y el 14 es justo el
+tiempo de reacción.
 
 #### Fricciones del re-sembrado (vistas el 2026-08-19)
 
